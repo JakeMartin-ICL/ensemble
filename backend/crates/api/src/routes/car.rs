@@ -5,8 +5,9 @@
 //! POST   /car/sessions/:id/skip-turn - skip to the other person's turn
 
 use axum::{Router, routing::{get, post}};
+use crate::AppState;
 
-pub fn router() -> Router {
+pub fn router() -> Router<AppState> {
     Router::new()
         .route("/sessions", post(create_session))
         .route("/sessions/:id", get(get_session))

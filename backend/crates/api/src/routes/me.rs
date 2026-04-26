@@ -1,0 +1,82 @@
+//! GET /me — return current user info from Spotify.
+
+use axum::{Json, extract::State, http::{HeaderMap, StatusCode}};
+use chrono::Utc;
+use serde_json::Value;
+use uuid::Uuid;
+use crate::AppState;
+
+type ApiResult<T> = Result<Json<T>, (StatusCode, Json<Value>)>;
+
+fn err(status: StatusCode, msg: impl std::fmt::Display) -> (StatusCode, Json<Value>) {
+    (status, Json(serde_json::json!({ "error": msg.to_string() })))
+}
+
+#[derive(serde::Serialize)]
+pub struct MeResponse {
+    display_name: String,
+    active_device: Option<DeviceInfo>,
+}
+
+#[derive(serde::Serialize)]
+struct DeviceInfo {
+    name: String,
+    #[serde(rename = "type")]
+    device_type: String,
+    is_active: bool,
+}
+
+pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<MeResponse> {
+    let user_id = headers
+        .get("x-user-id")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "missing X-User-Id header"))?
+        .parse::<Uuid>()
+        .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid X-User-Id"))?;
+
+    let user = db::users::get_user(&state.pool, user_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "user not found"))?;
+
+    let access_token = if user
+        .token_expires_at
+        .signed_duration_since(Utc::now())
+        < chrono::Duration::seconds(60)
+    {
+        let tokens = spotify::auth::refresh_token(
+            &user.refresh_token,
+            &state.spotify_client_id,
+            &state.spotify_client_secret,
+        )
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
+
+        let new_expires_at = Utc::now() + chrono::Duration::seconds(tokens.expires_in as i64);
+        db::users::update_tokens(&state.pool, user_id, &tokens.access_token, new_expires_at)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+        tokens.access_token
+    } else {
+        user.access_token
+    };
+
+    let spotify_me = spotify::player::get_me(&access_token)
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
+
+    let active_device = spotify::player::get_player(&access_token)
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?
+        .map(|d| DeviceInfo {
+            name: d.name,
+            device_type: d.device_type,
+            is_active: d.is_active,
+        });
+
+    Ok(Json(MeResponse {
+        display_name: spotify_me.display_name,
+        active_device,
+    }))
+}

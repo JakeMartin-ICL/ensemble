@@ -2,6 +2,7 @@
 //! Wraps sqlx pool and exposes typed queries for each domain.
 
 pub mod car;
+pub mod users;
 // pub mod party; // Not yet implemented
 
 pub use sqlx::PgPool;

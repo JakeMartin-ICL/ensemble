@@ -12,8 +12,6 @@ pub async fn next_track_flip_turn() -> anyhow::Result<()> {
 
 /// Reshuffle a playlist when it runs out, and continue.
 pub fn reshuffle(tracks: &mut Vec<String>) {
-    use std::collections::hash_map::DefaultHasher;
-    // Will use rand crate when implementing properly
     let _ = tracks;
     todo!()
 }

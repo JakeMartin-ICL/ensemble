@@ -1,0 +1,89 @@
+//! Database queries for the users table.
+
+use anyhow::Context;
+use chrono::{DateTime, Utc};
+use sqlx::PgPool;
+use uuid::Uuid;
+
+#[derive(sqlx::FromRow)]
+pub struct User {
+    pub id: Uuid,
+    pub spotify_id: String,
+    pub display_name: String,
+    pub access_token: String,
+    pub refresh_token: String,
+    pub token_expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+pub async fn upsert_user(
+    pool: &PgPool,
+    spotify_id: &str,
+    display_name: &str,
+    access_token: &str,
+    refresh_token: &str,
+    token_expires_at: DateTime<Utc>,
+) -> anyhow::Result<Uuid> {
+    let id: Uuid = sqlx::query_scalar(
+        r#"
+        INSERT INTO public.users
+            (spotify_id, display_name, access_token, refresh_token, token_expires_at)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (spotify_id) DO UPDATE SET
+            display_name     = EXCLUDED.display_name,
+            access_token     = EXCLUDED.access_token,
+            refresh_token    = EXCLUDED.refresh_token,
+            token_expires_at = EXCLUDED.token_expires_at,
+            updated_at       = now()
+        RETURNING id
+        "#,
+    )
+    .bind(spotify_id)
+    .bind(display_name)
+    .bind(access_token)
+    .bind(refresh_token)
+    .bind(token_expires_at)
+    .fetch_one(pool)
+    .await
+    .context("upserting user")?;
+    Ok(id)
+}
+
+pub async fn get_user(pool: &PgPool, id: Uuid) -> anyhow::Result<Option<User>> {
+    let user = sqlx::query_as::<_, User>(
+        r#"
+        SELECT id, spotify_id, display_name, access_token, refresh_token,
+               token_expires_at, created_at, updated_at
+        FROM public.users
+        WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .context("fetching user")?;
+    Ok(user)
+}
+
+pub async fn update_tokens(
+    pool: &PgPool,
+    id: Uuid,
+    access_token: &str,
+    token_expires_at: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE public.users
+        SET access_token = $1, token_expires_at = $2, updated_at = now()
+        WHERE id = $3
+        "#,
+    )
+    .bind(access_token)
+    .bind(token_expires_at)
+    .bind(id)
+    .execute(pool)
+    .await
+    .context("updating tokens")?;
+    Ok(())
+}

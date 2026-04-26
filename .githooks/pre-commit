@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+
+echo "→ cargo clippy"
+cargo clippy -- -D warnings
+
+echo "→ tsc"
+cd frontend
+npx tsc --noEmit
+
+echo "→ eslint"
+npx eslint src/
