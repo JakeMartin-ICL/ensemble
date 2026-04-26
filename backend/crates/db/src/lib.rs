@@ -7,7 +7,15 @@ pub mod users;
 
 pub use sqlx::PgPool;
 
-pub async fn connect(database_url: &str) -> anyhow::Result<PgPool> {
-    let pool = sqlx::PgPool::connect(database_url).await?;
-    Ok(pool)
+pub async fn connect() -> anyhow::Result<PgPool> {
+    use sqlx::postgres::PgConnectOptions;
+
+    let opts = PgConnectOptions::new()
+        .host(&std::env::var("DB_HOST")?)
+        .port(std::env::var("DB_PORT")?.parse()?)
+        .username(&std::env::var("DB_USER")?)
+        .password(&std::env::var("DB_PASSWORD")?)
+        .database(&std::env::var("DB_NAME")?);
+
+    Ok(PgPool::connect_with(opts).await?)
 }

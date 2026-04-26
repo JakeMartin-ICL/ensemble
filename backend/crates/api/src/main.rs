@@ -28,8 +28,7 @@ async fn main() -> anyhow::Result<()> {
 
     dotenvy::dotenv().ok();
 
-    let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
-    let pool = db::connect(&database_url).await?;
+    let pool = db::connect().await?;
 
     let state = AppState {
         pool,

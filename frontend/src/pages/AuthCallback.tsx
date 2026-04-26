@@ -23,6 +23,8 @@ export default function AuthCallback() {
       return
     }
 
+    if (!storedState) return // Already consumed (StrictMode double-invoke in dev)
+
     if (state !== storedState) {
       setError('State mismatch — possible CSRF attempt')
       return
