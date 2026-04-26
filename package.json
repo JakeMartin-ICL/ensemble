@@ -1,0 +1,11 @@
+{
+  "name": "ensemble",
+  "private": true,
+  "scripts": {
+    "sb:login": "supabase login",
+    "sb:push": "supabase db push"
+  },
+  "devDependencies": {
+    "supabase": "^2.95.3"
+  }
+}

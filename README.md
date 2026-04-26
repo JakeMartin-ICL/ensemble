@@ -29,14 +29,29 @@ docker-compose up -d
 
 Apply migrations via the Supabase CLI or directly against the local Postgres instance.
 
-### 3. Backend
+### 3. Supabase
+
+Link the CLI to the project (`.temp/` is gitignored, so this is required after a fresh clone):
+
+```sh
+npm run sb:login
+supabase link
+```
+
+To push schema changes:
+
+```sh
+npm run sb:push
+```
+
+### 4. Backend
 
 ```sh
 cargo build
 cargo run -p api
 ```
 
-### 4. Frontend
+### 5. Frontend
 
 ```sh
 cd frontend
@@ -44,7 +59,7 @@ npm install
 npm run dev
 ```
 
-### 5. Git hooks
+### 6. Git hooks
 
 The repo ships hooks in `.githooks/`. One command wires them up:
 

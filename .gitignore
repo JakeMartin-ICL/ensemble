@@ -9,5 +9,8 @@ dist/
 .env
 *.env.local
 
+# Supabase
+supabase/.temp/
+
 # OS
 .DS_Store
