@@ -379,6 +379,13 @@
   color: var(--text);
 }
 
+.turnRow {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
 .turnBadge {
   display: inline-block;
   padding: 6px 18px;
@@ -388,37 +395,7 @@
   font-weight: 700;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  transition: color 0.4s ease, border-color 0.4s ease, background 0.4s ease;
-}
-
-.playlistLegend {
-  display: flex;
-  gap: 18px;
-  flex-wrap: wrap;
-  justify-content: center;
-  max-width: 380px;
-}
-
-.legendItem {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-muted);
-  letter-spacing: 0.01em;
-  transition: color 0.3s ease;
-}
-
-.legendItemActive {
-  color: var(--text-h);
-}
-
-.legendDot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
+  transition: color 0.4s ease, border-color 0.4s ease, background 0.4s ease, box-shadow 0.4s ease;
 }
 
 .progressPanel {
@@ -533,54 +510,34 @@
   max-width: 560px;
   display: flex;
   flex-direction: column;
-  gap: 28px;
+  gap: 16px;
 }
 
-.queueSection {
+.queueTabs {
   display: flex;
-  flex-direction: column;
-  gap: 12px;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
-.queueTitle {
-  margin: 0;
-  font-family: var(--heading);
-  font-size: 17px;
+.queueTab {
+  display: inline-block;
+  padding: 6px 18px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 100px;
+  font-family: var(--sans);
+  font-size: 11px;
   font-weight: 700;
-  letter-spacing: -0.2px;
-  color: var(--text-h);
-}
-
-.playlistQueues {
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-}
-
-.playlistQueue {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.playlistQueueTitle {
-  margin: 0;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
 }
 
-.playlistDot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  display: inline-block;
+.queueTab:hover {
+  color: var(--text-h);
+  border-color: rgba(255, 255, 255, 0.15);
 }
 
 .queueList {
@@ -594,19 +551,21 @@
 
 .queueItem {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 12px;
   padding: 10px 14px;
   background: var(--surface-2);
   border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--item-color, var(--border-subtle));
   border-radius: 10px;
   transition: border-color 0.15s ease, background 0.15s ease;
 }
 
 .queueItem:hover {
   background: var(--surface-3);
-  border-color: var(--border);
+  border-color: var(--border-subtle);
+  border-left-color: var(--item-color, var(--border-subtle));
 }
 
 .queueTrackText {

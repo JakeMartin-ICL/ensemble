@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../../lib/supabase'
@@ -260,31 +260,26 @@ export default function WeaveSession() {
           <span className={styles.trackName}>{track?.name ?? '—'}</span>
           <span className={styles.artistName}>{track?.artist ?? '—'}</span>
         </div>
-        {(() => {
-          const color = playlistColors.get(session.current_playlist_id) ?? '#c084fc'
-          return (
-            <div
-              className={styles.turnBadge}
-              style={{
-                color,
-                borderColor: hexAlpha(color, 0.45),
-                background: hexAlpha(color, 0.1),
-                boxShadow: `0 0 16px ${hexAlpha(color, 0.1)} inset`,
-              }}
-            >
-              {session.current_playlist_name}
-            </div>
-          )
-        })()}
-        <div className={styles.playlistLegend}>
+        <div className={styles.turnRow}>
           {session.playlists.map((p) => {
             const color = playlistColors.get(p.id) ?? '#c084fc'
             const isActive = p.id === session.current_playlist_id
             return (
-              <span key={p.id} className={`${styles.legendItem} ${isActive ? styles.legendItemActive : ''}`}>
-                <span className={styles.legendDot} style={{ background: color }} />
+              <div
+                key={p.id}
+                className={styles.turnBadge}
+                style={isActive ? {
+                  color,
+                  borderColor: hexAlpha(color, 0.45),
+                  background: hexAlpha(color, 0.1),
+                  boxShadow: `0 0 16px ${hexAlpha(color, 0.1)} inset`,
+                } : {
+                  color,
+                  borderColor: hexAlpha(color, 0.4),
+                }}
+              >
                 {p.name}
-              </span>
+              </div>
             )
           })}
         </div>
@@ -411,34 +406,58 @@ function QueuePanel({
   onMove: (playlist: PlaylistQueue, item: QueueItem, direction: -1 | 1) => void
   playlistColors: Map<string, string>
 }) {
+  const [activeTab, setActiveTab] = useState<string>('unified')
+
+  const activePlaylist = queue.playlists.find((p) => p.playlist_id === activeTab)
+
   return (
     <section className={styles.queuePanel}>
-      <div className={styles.queueSection}>
-        <h2 className={styles.queueTitle}>Up next</h2>
+      <div className={styles.queueTabs}>
+        <button
+          className={styles.queueTab}
+          onClick={() => { setActiveTab('unified') }}
+          style={activeTab === 'unified' ? {
+            color: 'var(--accent-light)',
+            borderColor: 'rgba(170, 59, 255, 0.45)',
+            background: 'rgba(170, 59, 255, 0.1)',
+          } : undefined}
+        >
+          Up next
+        </button>
+        {queue.playlists.map((playlist) => {
+          const color = playlistColors.get(playlist.playlist_id) ?? '#c084fc'
+          const isActive = activeTab === playlist.playlist_id
+          return (
+            <button
+              key={playlist.playlist_id}
+              className={styles.queueTab}
+              onClick={() => { setActiveTab(playlist.playlist_id) }}
+              style={isActive ? {
+                color,
+                borderColor: hexAlpha(color, 0.45),
+                background: hexAlpha(color, 0.1),
+                boxShadow: `0 0 16px ${hexAlpha(color, 0.1)} inset`,
+              } : {
+                color,
+                borderColor: hexAlpha(color, 0.4),
+              }}
+            >
+              {playlist.playlist_name}
+            </button>
+          )
+        })}
+      </div>
+
+      {activeTab === 'unified' ? (
         <QueueList items={queue.unified} playlistColors={playlistColors} />
-      </div>
-      <div className={styles.queueSection}>
-        <h2 className={styles.queueTitle}>Playlist queues</h2>
-        <div className={styles.playlistQueues}>
-          {queue.playlists.map((playlist) => {
-            const color = playlistColors.get(playlist.playlist_id) ?? '#c084fc'
-            return (
-              <div className={styles.playlistQueue} key={playlist.playlist_id}>
-                <h3 className={styles.playlistQueueTitle}>
-                  <span className={styles.playlistDot} style={{ background: color }} />
-                  {playlist.playlist_name}
-                </h3>
-                <QueueList
-                  items={playlist.items}
-                  playlist={playlist}
-                  onMove={onMove}
-                  playlistColors={playlistColors}
-                />
-              </div>
-            )
-          })}
-        </div>
-      </div>
+      ) : activePlaylist ? (
+        <QueueList
+          items={activePlaylist.items}
+          playlist={activePlaylist}
+          onMove={onMove}
+          playlistColors={playlistColors}
+        />
+      ) : null}
     </section>
   )
 }
@@ -464,13 +483,9 @@ function QueueList({
         <li
           className={styles.queueItem}
           key={`${item.playlist_id}-${item.position.toString()}-${item.uri}`}
+          style={{ '--item-color': playlistColors.get(item.playlist_id) ?? '#c084fc' } as React.CSSProperties}
         >
           <TrackLabel item={item} />
-          <span
-            className={styles.playlistDot}
-            style={{ background: playlistColors.get(item.playlist_id) ?? '#c084fc' }}
-            title={item.playlist_name}
-          />
           {playlist && onMove && (
             <div className={styles.queueMoveControls}>
               <button
