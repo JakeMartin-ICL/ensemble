@@ -2,7 +2,7 @@ mod routes;
 
 use anyhow::Context;
 use axum::{
-    http::{header, HeaderName, HeaderValue, Method},
+    http::{header, HeaderValue, Method},
     routing::get,
     Router,
 };
@@ -54,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
     let cors = CorsLayer::new()
         .allow_origin(allowed_origin)
         .allow_methods([Method::GET, Method::POST])
-        .allow_headers([header::CONTENT_TYPE, HeaderName::from_static("x-user-id")]);
+        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
 
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))

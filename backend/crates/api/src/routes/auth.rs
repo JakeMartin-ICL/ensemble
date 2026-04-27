@@ -3,7 +3,12 @@
 //! POST /auth/refresh  - refresh an access token
 
 use crate::AppState;
-use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
+use axum::{
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    routing::post,
+    Json, Router,
+};
 use chrono::Utc;
 use serde_json::Value;
 use uuid::Uuid;
@@ -33,6 +38,7 @@ struct CallbackResponse {
     user_id: Uuid,
     spotify_id: String,
     display_name: String,
+    session_token: String,
 }
 
 async fn callback(
@@ -72,16 +78,18 @@ async fn callback(
     .await
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
+    let session_token = format!("ens_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    let session_expires_at = Utc::now() + chrono::Duration::days(30);
+    db::users::create_session(&state.pool, user_id, &session_token, session_expires_at)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
     Ok(Json(CallbackResponse {
         user_id,
         spotify_id: me.id,
         display_name: me.display_name,
+        session_token,
     }))
-}
-
-#[derive(serde::Deserialize)]
-struct RefreshRequest {
-    user_id: Uuid,
 }
 
 #[derive(serde::Serialize)]
@@ -90,11 +98,9 @@ struct RefreshResponse {
     expires_at: String,
 }
 
-async fn refresh(
-    State(state): State<AppState>,
-    Json(body): Json<RefreshRequest>,
-) -> ApiResult<RefreshResponse> {
-    let user = db::users::get_user(&state.pool, body.user_id)
+async fn refresh(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<RefreshResponse> {
+    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    let user = db::users::get_user(&state.pool, user_id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "user not found"))?;
@@ -109,14 +115,9 @@ async fn refresh(
 
     let token_expires_at = Utc::now() + chrono::Duration::seconds(tokens.expires_in as i64);
 
-    db::users::update_tokens(
-        &state.pool,
-        body.user_id,
-        &tokens.access_token,
-        token_expires_at,
-    )
-    .await
-    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    db::users::update_tokens(&state.pool, user_id, &tokens.access_token, token_expires_at)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     Ok(Json(RefreshResponse {
         access_token: tokens.access_token,

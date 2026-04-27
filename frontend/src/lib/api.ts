@@ -2,6 +2,11 @@ const _apiUrl = import.meta.env.VITE_API_URL as string | undefined
 if (!_apiUrl) throw new Error('VITE_API_URL is not set')
 const BASE_URL: string = _apiUrl
 
+function authHeaders(): Record<string, string> {
+  const token = localStorage.getItem('session_token')
+  return token ? { Authorization: `Bearer ${token}` } : {}
+}
+
 async function errorMessage(res: Response): Promise<string> {
   const fallback = `API error: ${res.status.toString()}`
   const contentType = res.headers.get('content-type') ?? ''
@@ -22,7 +27,7 @@ export async function post<T>(
 ): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...headers },
+    headers: { 'Content-Type': 'application/json', ...authHeaders(), ...headers },
     body: JSON.stringify(body),
   })
   if (!res.ok) throw new Error(await errorMessage(res))
@@ -30,7 +35,7 @@ export async function post<T>(
 }
 
 export async function get<T>(path: string, headers?: Record<string, string>): Promise<T> {
-  const res = await fetch(`${BASE_URL}${path}`, { headers })
+  const res = await fetch(`${BASE_URL}${path}`, { headers: { ...authHeaders(), ...headers } })
   if (!res.ok) throw new Error(await errorMessage(res))
   return res.json() as Promise<T>
 }

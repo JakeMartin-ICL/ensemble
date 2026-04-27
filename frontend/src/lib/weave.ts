@@ -1,8 +1,5 @@
 import { get, post } from './api'
 
-const userId = () => localStorage.getItem('user_id') ?? ''
-const headers = () => ({ 'X-User-Id': userId() })
-
 export interface Session {
   id: string
   playlists: {
@@ -77,36 +74,35 @@ export interface TrackSearchResponse {
 }
 
 export const getActiveSession = () =>
-  get<Session | null>('/car/sessions/active', headers())
+  get<Session | null>('/car/sessions/active')
 
 export const createSession = (playlist_ids: string[]) =>
-  post<Session>('/car/sessions', { playlist_ids }, headers())
+  post<Session>('/car/sessions', { playlist_ids })
 
 export const skipSong = (id: string) =>
-  post<Session>(`/car/sessions/${id}/skip-song`, {}, headers())
+  post<Session>(`/car/sessions/${id}/skip-song`, {})
 
 export const skipTurn = (id: string) =>
-  post<Session>(`/car/sessions/${id}/skip-turn`, {}, headers())
+  post<Session>(`/car/sessions/${id}/skip-turn`, {})
 
 export const getPlayback = (id: string) =>
-  get<PlaybackState | null>(`/car/sessions/${id}/playback`, headers())
+  get<PlaybackState | null>(`/car/sessions/${id}/playback`)
 
 export const pauseSession = (id: string) =>
-  post<PlaybackState | null>(`/car/sessions/${id}/pause`, {}, headers())
+  post<PlaybackState | null>(`/car/sessions/${id}/pause`, {})
 
 export const resumeSession = (id: string) =>
-  post<PlaybackState | null>(`/car/sessions/${id}/resume`, {}, headers())
+  post<PlaybackState | null>(`/car/sessions/${id}/resume`, {})
 
 export const restartSession = (id: string) =>
-  post<PlaybackState | null>(`/car/sessions/${id}/restart`, {}, headers())
+  post<PlaybackState | null>(`/car/sessions/${id}/restart`, {})
 
 export const getQueue = (id: string) =>
-  get<QueueState>(`/car/sessions/${id}/queue`, headers())
+  get<QueueState>(`/car/sessions/${id}/queue`)
 
 export const searchQueueTracks = (id: string, q: string, scope: 'local' | 'spotify') =>
   get<TrackSearchResponse>(
     `/car/sessions/${id}/queue/search?q=${encodeURIComponent(q)}&scope=${scope}`,
-    headers(),
   )
 
 export const addQueueTrack = (
@@ -117,7 +113,6 @@ export const addQueueTrack = (
   post<QueueState>(
     `/car/sessions/${id}/queue/add`,
     { playlist_index, track },
-    headers(),
   )
 
 export const reorderPlaylistQueue = (
@@ -129,14 +124,13 @@ export const reorderPlaylistQueue = (
   post<QueueState>(
     `/car/sessions/${id}/queue/${playlist_index.toString()}/reorder`,
     { from_position, to_position },
-    headers(),
   )
 
 export const endSession = (id: string) =>
-  post<{ ok: boolean }>(`/car/sessions/${id}/end`, {}, headers())
+  post<{ ok: boolean }>(`/car/sessions/${id}/end`, {})
 
 export const getPlaylists = () =>
-  get<Playlist[]>('/car/playlists', headers())
+  get<Playlist[]>('/car/playlists')
 
 export const getTrack = (uri: string) =>
-  get<TrackDetails>(`/car/track/${encodeURIComponent(uri)}`, headers())
+  get<TrackDetails>(`/car/track/${encodeURIComponent(uri)}`)

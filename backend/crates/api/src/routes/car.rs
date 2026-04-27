@@ -24,15 +24,6 @@ fn err(
     (status, Json(serde_json::json!({ "error": format!("{e}") })))
 }
 
-fn user_id_from_headers(headers: &HeaderMap) -> Result<Uuid, (StatusCode, Json<Value>)> {
-    headers
-        .get("x-user-id")
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "missing X-User-Id header"))?
-        .parse::<Uuid>()
-        .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid X-User-Id"))
-}
-
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/sessions", post(create_session))
@@ -249,7 +240,7 @@ async fn create_session(
     headers: HeaderMap,
     Json(body): Json<CreateSessionBody>,
 ) -> ApiResult<SessionResponse> {
-    let user_id = user_id_from_headers(&headers)?;
+    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
     let access_token = get_access_token(&state, user_id).await?;
 
     if body.playlist_ids.len() < 2 {
@@ -332,7 +323,7 @@ async fn get_active_session(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> ApiResult<Option<SessionResponse>> {
-    let user_id = user_id_from_headers(&headers)?;
+    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
 
     let session = db::car::get_active_session(&state.pool, user_id)
         .await
@@ -352,7 +343,7 @@ async fn skip_song(
     headers: HeaderMap,
     Path(session_id): Path<Uuid>,
 ) -> ApiResult<SessionResponse> {
-    let user_id = user_id_from_headers(&headers)?;
+    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
     let session = get_verified_session(&state, session_id, user_id).await?;
     let access_token = get_access_token(&state, user_id).await?;
 
@@ -387,7 +378,7 @@ async fn skip_turn(
     headers: HeaderMap,
     Path(session_id): Path<Uuid>,
 ) -> ApiResult<SessionResponse> {
-    let user_id = user_id_from_headers(&headers)?;
+    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
     let session = get_verified_session(&state, session_id, user_id).await?;
     let access_token = get_access_token(&state, user_id).await?;
 
@@ -422,7 +413,7 @@ async fn get_playback(
     headers: HeaderMap,
     Path(session_id): Path<Uuid>,
 ) -> ApiResult<Option<PlaybackResponse>> {
-    let user_id = user_id_from_headers(&headers)?;
+    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
     get_verified_session(&state, session_id, user_id).await?;
     let access_token = get_access_token(&state, user_id).await?;
 
@@ -438,7 +429,7 @@ async fn pause_session(
     headers: HeaderMap,
     Path(session_id): Path<Uuid>,
 ) -> ApiResult<Option<PlaybackResponse>> {
-    let user_id = user_id_from_headers(&headers)?;
+    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
     get_verified_session(&state, session_id, user_id).await?;
     let access_token = get_access_token(&state, user_id).await?;
 
@@ -458,7 +449,7 @@ async fn resume_session(
     headers: HeaderMap,
     Path(session_id): Path<Uuid>,
 ) -> ApiResult<Option<PlaybackResponse>> {
-    let user_id = user_id_from_headers(&headers)?;
+    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
     get_verified_session(&state, session_id, user_id).await?;
     let access_token = get_access_token(&state, user_id).await?;
 
@@ -478,7 +469,7 @@ async fn restart_session(
     headers: HeaderMap,
     Path(session_id): Path<Uuid>,
 ) -> ApiResult<Option<PlaybackResponse>> {
-    let user_id = user_id_from_headers(&headers)?;
+    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
     get_verified_session(&state, session_id, user_id).await?;
     let access_token = get_access_token(&state, user_id).await?;
 
@@ -498,7 +489,7 @@ async fn get_queue(
     headers: HeaderMap,
     Path(session_id): Path<Uuid>,
 ) -> ApiResult<QueueResponse> {
-    let user_id = user_id_from_headers(&headers)?;
+    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
     let session = get_verified_session(&state, session_id, user_id).await?;
 
     Ok(Json(build_queue_response(&session)))
@@ -510,7 +501,7 @@ async fn search_queue_tracks(
     Path(session_id): Path<Uuid>,
     Query(query): Query<SearchQueueQuery>,
 ) -> ApiResult<TrackSearchResponse> {
-    let user_id = user_id_from_headers(&headers)?;
+    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
     let session = get_verified_session(&state, session_id, user_id).await?;
     let term = query.q.trim();
     if term.len() < 2 {
@@ -551,7 +542,7 @@ async fn add_queue_track(
     Path(session_id): Path<Uuid>,
     Json(body): Json<AddQueueTrackBody>,
 ) -> ApiResult<QueueResponse> {
-    let user_id = user_id_from_headers(&headers)?;
+    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
     let mut session = get_verified_session(&state, session_id, user_id).await?;
 
     let Some(playlist) = session.playlists.0.get_mut(body.playlist_index) else {
@@ -602,7 +593,7 @@ async fn reorder_playlist_queue(
     Path((session_id, playlist_index)): Path<(Uuid, usize)>,
     Json(body): Json<ReorderQueueBody>,
 ) -> ApiResult<QueueResponse> {
-    let user_id = user_id_from_headers(&headers)?;
+    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
     let mut session = get_verified_session(&state, session_id, user_id).await?;
 
     let Some(playlist) = session.playlists.0.get_mut(playlist_index) else {
@@ -651,7 +642,7 @@ async fn end_session(
     headers: HeaderMap,
     Path(session_id): Path<Uuid>,
 ) -> ApiResult<Value> {
-    let user_id = user_id_from_headers(&headers)?;
+    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
     tracing::debug!("end_session: session_id={session_id} user_id={user_id}");
     get_verified_session(&state, session_id, user_id).await?;
 
@@ -676,7 +667,7 @@ async fn get_playlists(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> ApiResult<Vec<PlaylistSummaryResponse>> {
-    let user_id = user_id_from_headers(&headers)?;
+    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
     let access_token = get_access_token(&state, user_id).await?;
 
     let playlists = spotify::playlist::get_user_playlists(&access_token)
@@ -709,7 +700,7 @@ async fn get_track(
     headers: HeaderMap,
     Path(uri): Path<String>,
 ) -> ApiResult<TrackResponse> {
-    let user_id = user_id_from_headers(&headers)?;
+    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
     let access_token = get_access_token(&state, user_id).await?;
 
     // Extract track ID from URI: "spotify:track:<id>"

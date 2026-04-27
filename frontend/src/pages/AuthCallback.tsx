@@ -6,6 +6,7 @@ interface CallbackResponse {
   user_id: string
   spotify_id: string
   display_name: string
+  session_token: string
 }
 
 export default function AuthCallback() {
@@ -35,6 +36,7 @@ export default function AuthCallback() {
     void post<CallbackResponse>('/auth/callback', { code })
       .then((data) => {
         localStorage.setItem('user_id', data.user_id)
+        localStorage.setItem('session_token', data.session_token)
         void navigate('/')
       })
       .catch((e: unknown) => {

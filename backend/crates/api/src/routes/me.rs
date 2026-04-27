@@ -8,7 +8,6 @@ use axum::{
 };
 use chrono::Utc;
 use serde_json::Value;
-use uuid::Uuid;
 
 type ApiResult<T> = Result<Json<T>, (StatusCode, Json<Value>)>;
 
@@ -34,12 +33,7 @@ struct DeviceInfo {
 }
 
 pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<MeResponse> {
-    let user_id = headers
-        .get("x-user-id")
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "missing X-User-Id header"))?
-        .parse::<Uuid>()
-        .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid X-User-Id"))?;
+    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
 
     let user = db::users::get_user(&state.pool, user_id)
         .await

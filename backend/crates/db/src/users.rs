@@ -87,3 +87,40 @@ pub async fn update_tokens(
     .context("updating tokens")?;
     Ok(())
 }
+
+pub async fn create_session(
+    pool: &PgPool,
+    user_id: Uuid,
+    token: &str,
+    expires_at: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO public.user_sessions (user_id, token_hash, expires_at)
+        VALUES ($1, encode(digest($2, 'sha256'), 'hex'), $3)
+        "#,
+    )
+    .bind(user_id)
+    .bind(token)
+    .bind(expires_at)
+    .execute(pool)
+    .await
+    .context("creating user session")?;
+    Ok(())
+}
+
+pub async fn user_id_for_session(pool: &PgPool, token: &str) -> anyhow::Result<Option<Uuid>> {
+    let user_id = sqlx::query_scalar(
+        r#"
+        SELECT user_id
+        FROM public.user_sessions
+        WHERE token_hash = encode(digest($1, 'sha256'), 'hex')
+          AND expires_at > now()
+        "#,
+    )
+    .bind(token)
+    .fetch_optional(pool)
+    .await
+    .context("fetching user session")?;
+    Ok(user_id)
+}

@@ -15,7 +15,8 @@ interface MeResponse {
 
 export default function Home() {
   const [userId] = useState(() => localStorage.getItem('user_id'))
-  return userId ? <LoggedIn userId={userId} /> : <LoggedOut />
+  const [sessionToken] = useState(() => localStorage.getItem('session_token'))
+  return userId && sessionToken ? <LoggedIn userId={userId} /> : <LoggedOut />
 }
 
 function LoggedOut() {
@@ -55,7 +56,7 @@ function LoggedIn({ userId }: { userId: string }) {
   const navigate = useNavigate()
 
   useEffect(() => {
-    void get<MeResponse>('/me', { 'X-User-Id': userId })
+    void get<MeResponse>('/me')
       .then(setMe)
       .catch((e: unknown) => {
         setError(e instanceof Error ? e.message : String(e))
@@ -69,7 +70,7 @@ function LoggedIn({ userId }: { userId: string }) {
         'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: 'users', filter: `id=eq.${userId}` },
         () => {
-          void get<MeResponse>('/me', { 'X-User-Id': userId }).then(setMe)
+          void get<MeResponse>('/me').then(setMe)
         },
       )
       .subscribe()
