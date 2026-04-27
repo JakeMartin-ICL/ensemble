@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import QueueList from '../../components/QueueList'
 import { supabase } from '../../lib/supabase'
@@ -450,6 +450,8 @@ function PartyQueuePanel({
   const [searchingLocal, setSearchingLocal] = useState(false)
   const [searchingSpotify, setSearchingSpotify] = useState(false)
   const [addingUri, setAddingUri] = useState<string | null>(null)
+  const searchResultsRef = useRef<HTMLDivElement | null>(null)
+  const [searchResultsHeight, setSearchResultsHeight] = useState(0)
 
   useEffect(() => {
     const term = query.trim()
@@ -527,6 +529,33 @@ function PartyQueuePanel({
     result,
     playlists: [],
   }))
+  const searchOpen = query.trim().length >= 2
+
+  useLayoutEffect(() => {
+    if (!searchOpen) {
+      setSearchResultsHeight(0)
+      return
+    }
+
+    function updateHeight() {
+      const height = searchResultsRef.current?.scrollHeight ?? 0
+      setSearchResultsHeight(Math.min(height, 320))
+    }
+
+    updateHeight()
+    const observer = new ResizeObserver(updateHeight)
+    if (searchResultsRef.current) observer.observe(searchResultsRef.current)
+    return () => { observer.disconnect() }
+  }, [
+    libraryLoading,
+    localDedupedResults.length,
+    query,
+    searchOpen,
+    searchingLocal,
+    searchingSpotify,
+    spotifyDedupedResults.length,
+    spotifyResults,
+  ])
 
   return (
     <section className={styles.queuePanel}>
@@ -540,55 +569,17 @@ function PartyQueuePanel({
             aria-label="Search songs"
           />
         </label>
-        {query.trim().length >= 2 && (
-          <div className={styles.queueSearchResults}>
-            {(libraryLoading || searchingLocal) && <p className={styles.queueEmpty}>Searching your playlists...</p>}
-            {!libraryLoading && !searchingLocal && localDedupedResults.length === 0 && <p className={styles.queueEmpty}>No matches</p>}
-            {!libraryLoading && !searchingLocal && localDedupedResults.map(({ result, playlists }) => (
-              <div key={result.uri} className={styles.queueSearchResult}>
-                {result.album_art_url
-                  ? <img className={styles.queueSearchArt} src={result.album_art_url} alt="" />
-                  : <div className={styles.queueSearchArt} />
-                }
-                <span className={styles.queueTrackText}>
-                  <span className={styles.queueTrackName}>{result.name ?? result.uri}</span>
-                  {result.artist && <span className={styles.queueArtistName}>{result.artist}</span>}
-                  {playlists.length > 0 && <span className={styles.queuePlaylistName}>{playlists.map((playlist) => playlist.playlist_name).join(', ')}</span>}
-                </span>
-                <button
-                  className={styles.queueSearchAddBtn}
-                  style={{ color: '#1db954', borderColor: 'rgba(29, 185, 84, 0.45)' }}
-                  onClick={() => { handleAdd(result) }}
-                  disabled={addingUri === result.uri}
-                  type="button"
-                  aria-label="Add track"
-                  title="Add track"
-                >
-                  <PlusIcon />
-                </button>
-              </div>
-            ))}
-
-            {!searchingLocal && spotifyResults === null && !searchingSpotify && (
-              <button
-                className={styles.spotifySearchBtn}
-                onClick={handleSearchSpotify}
-                type="button"
-              >
-                <SpotifyIcon />
-                Search Spotify
-              </button>
-            )}
-            {searchingSpotify && <p className={styles.queueEmpty}>Searching Spotify...</p>}
-
-            {spotifyResults !== null && (
+        <div
+          className={styles.queueSearchResultsSlot}
+          style={{ height: searchResultsHeight }}
+          aria-hidden={!searchOpen}
+        >
+          <div ref={searchResultsRef} className={styles.queueSearchResults}>
+            {searchOpen && (
               <>
-                <div className={styles.spotifyDivider}>
-                  <SpotifyIcon />
-                  Spotify
-                </div>
-                {spotifyDedupedResults.length === 0 && <p className={styles.queueEmpty}>No Spotify results</p>}
-                {spotifyDedupedResults.map(({ result }) => (
+                {(libraryLoading || searchingLocal) && localDedupedResults.length === 0 && <p className={styles.queueEmpty}>Searching your playlists...</p>}
+                {!libraryLoading && !searchingLocal && localDedupedResults.length === 0 && <p className={styles.queueEmpty}>No matches</p>}
+                {!libraryLoading && localDedupedResults.map(({ result, playlists }) => (
                   <div key={result.uri} className={styles.queueSearchResult}>
                     {result.album_art_url
                       ? <img className={styles.queueSearchArt} src={result.album_art_url} alt="" />
@@ -597,6 +588,7 @@ function PartyQueuePanel({
                     <span className={styles.queueTrackText}>
                       <span className={styles.queueTrackName}>{result.name ?? result.uri}</span>
                       {result.artist && <span className={styles.queueArtistName}>{result.artist}</span>}
+                      {playlists.length > 0 && <span className={styles.queuePlaylistName}>{playlists.map((playlist) => playlist.playlist_name).join(', ')}</span>}
                     </span>
                     <button
                       className={styles.queueSearchAddBtn}
@@ -611,10 +603,55 @@ function PartyQueuePanel({
                     </button>
                   </div>
                 ))}
+
+                {spotifyResults === null && (
+                  <button
+                    className={styles.spotifySearchBtn}
+                    onClick={handleSearchSpotify}
+                    disabled={searchingSpotify}
+                    type="button"
+                  >
+                    <SpotifyIcon />
+                    {searchingSpotify ? 'Searching Spotify...' : 'Search Spotify'}
+                  </button>
+                )}
+
+                {spotifyResults !== null && (
+                  <>
+                    <div className={styles.spotifyDivider}>
+                      <SpotifyIcon />
+                      Spotify
+                    </div>
+                    {spotifyDedupedResults.length === 0 && <p className={styles.queueEmpty}>No Spotify results</p>}
+                    {spotifyDedupedResults.map(({ result }) => (
+                      <div key={result.uri} className={styles.queueSearchResult}>
+                        {result.album_art_url
+                          ? <img className={styles.queueSearchArt} src={result.album_art_url} alt="" />
+                          : <div className={styles.queueSearchArt} />
+                        }
+                        <span className={styles.queueTrackText}>
+                          <span className={styles.queueTrackName}>{result.name ?? result.uri}</span>
+                          {result.artist && <span className={styles.queueArtistName}>{result.artist}</span>}
+                        </span>
+                        <button
+                          className={styles.queueSearchAddBtn}
+                          style={{ color: '#1db954', borderColor: 'rgba(29, 185, 84, 0.45)' }}
+                          onClick={() => { handleAdd(result) }}
+                          disabled={addingUri === result.uri}
+                          type="button"
+                          aria-label="Add track"
+                          title="Add track"
+                        >
+                          <PlusIcon />
+                        </button>
+                      </div>
+                    ))}
+                  </>
+                )}
               </>
             )}
           </div>
-        )}
+        </div>
       </div>
 
       <div className={styles.queueTabs}>

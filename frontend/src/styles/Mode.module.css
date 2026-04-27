@@ -765,7 +765,7 @@
 .queueSearch {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 0;
 }
 
 .queueSearchField {
@@ -807,11 +807,18 @@
   box-shadow: 0 0 0 3px rgba(170, 59, 255, 0.12);
 }
 
+.queueSearchResultsSlot {
+  overflow: hidden;
+  transition: height 0.18s ease;
+}
+
 .queueSearchResults {
   display: flex;
   flex-direction: column;
   gap: 5px;
   max-height: 320px;
+  padding-top: 8px;
+  box-sizing: border-box;
   overflow: auto;
 }
 
@@ -876,6 +883,11 @@
 
 .spotifySearchBtn:active {
   background: rgba(29, 185, 84, 0.12);
+}
+
+.spotifySearchBtn:disabled {
+  cursor: default;
+  opacity: 0.58;
 }
 
 .spotifyDivider {
