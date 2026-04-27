@@ -60,6 +60,22 @@ export interface QueueState {
   playlists: PlaylistQueue[]
 }
 
+export interface TrackSearchResult {
+  uri: string
+  name: string | null
+  artist: string | null
+  album_art_url: string | null
+  duration_ms: number | null
+  playlist_index: number | null
+  playlist_id: string | null
+  playlist_name: string | null
+}
+
+export interface TrackSearchResponse {
+  scope: 'local' | 'spotify'
+  results: TrackSearchResult[]
+}
+
 export const getActiveSession = () =>
   get<Session | null>('/car/sessions/active', headers())
 
@@ -86,6 +102,23 @@ export const restartSession = (id: string) =>
 
 export const getQueue = (id: string) =>
   get<QueueState>(`/car/sessions/${id}/queue`, headers())
+
+export const searchQueueTracks = (id: string, q: string, scope: 'local' | 'spotify') =>
+  get<TrackSearchResponse>(
+    `/car/sessions/${id}/queue/search?q=${encodeURIComponent(q)}&scope=${scope}`,
+    headers(),
+  )
+
+export const addQueueTrack = (
+  id: string,
+  playlist_index: number,
+  track: TrackSearchResult,
+) =>
+  post<QueueState>(
+    `/car/sessions/${id}/queue/add`,
+    { playlist_index, track },
+    headers(),
+  )
 
 export const reorderPlaylistQueue = (
   id: string,

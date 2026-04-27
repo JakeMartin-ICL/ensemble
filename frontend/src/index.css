@@ -1,5 +1,9 @@
 @import url('https://fonts.googleapis.com/css2?family=Syne:wght@500;600;700;800&family=Outfit:wght@300;400;500;600&display=swap');
 
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
 :root {
   /* ── Background layers ── */
   --bg: #08080f;
@@ -50,6 +54,38 @@
   @media (max-width: 1024px) {
     font-size: 16px;
   }
+}
+
+/* ── Scrollbars ── */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(130, 80, 200, 0.35) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(130, 80, 200, 0.35);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(170, 59, 255, 0.65);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+::-webkit-scrollbar-button {
+  background: var(--bg);
 }
 
 body {

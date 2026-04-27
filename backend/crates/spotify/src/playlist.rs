@@ -17,6 +17,14 @@ pub struct PlaylistTrack {
     pub duration_ms: u64,
 }
 
+pub struct TrackSearchResult {
+    pub uri: String,
+    pub name: String,
+    pub artist: String,
+    pub album_art_url: Option<String>,
+    pub duration_ms: u64,
+}
+
 #[derive(serde::Deserialize)]
 struct RawTracksPage {
     items: Vec<Option<RawTrackItem>>,
@@ -213,4 +221,64 @@ pub async fn get_user_playlists(access_token: &str) -> anyhow::Result<Vec<Playli
     }
 
     Ok(playlists)
+}
+
+#[derive(serde::Deserialize)]
+struct RawSearchResponse {
+    tracks: RawSearchTracks,
+}
+
+#[derive(serde::Deserialize)]
+struct RawSearchTracks {
+    items: Vec<RawTrack>,
+}
+
+pub async fn search_tracks(
+    access_token: &str,
+    query: &str,
+) -> anyhow::Result<Vec<TrackSearchResult>> {
+    let resp = reqwest::Client::new()
+        .get("https://api.spotify.com/v1/search")
+        .bearer_auth(access_token)
+        .query(&[("q", query), ("type", "track"), ("limit", "10")])
+        .send()
+        .await
+        .context("searching Spotify tracks")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("Spotify track search returned {status}: {body}");
+    }
+
+    let raw = resp
+        .json::<RawSearchResponse>()
+        .await
+        .context("parsing Spotify track search response")?;
+
+    Ok(raw
+        .tracks
+        .items
+        .into_iter()
+        .filter(|item| item.item_type.as_deref().is_none_or(|t| t == "track"))
+        .filter(|item| item.is_playable != Some(false))
+        .filter_map(|item| {
+            item.uri.map(|uri| TrackSearchResult {
+                uri,
+                name: item.name.unwrap_or_else(|| "Unknown track".to_string()),
+                artist: item
+                    .artists
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|a| a.name)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                album_art_url: item
+                    .album
+                    .and_then(|a| a.images.into_iter().next())
+                    .map(|i| i.url),
+                duration_ms: item.duration_ms.unwrap_or(0),
+            })
+        })
+        .collect())
 }

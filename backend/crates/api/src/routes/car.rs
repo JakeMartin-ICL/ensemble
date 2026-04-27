@@ -1,7 +1,7 @@
 //! Weave (car mode) endpoints.
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     routing::{get, post},
     Json, Router,
@@ -44,6 +44,8 @@ pub fn router() -> Router<AppState> {
         .route("/sessions/{id}/resume", post(resume_session))
         .route("/sessions/{id}/restart", post(restart_session))
         .route("/sessions/{id}/queue", get(get_queue))
+        .route("/sessions/{id}/queue/add", post(add_queue_track))
+        .route("/sessions/{id}/queue/search", get(search_queue_tracks))
         .route(
             "/sessions/{id}/queue/{playlist_index}/reorder",
             post(reorder_playlist_queue),
@@ -113,6 +115,45 @@ struct PlaylistQueueResponse {
 struct ReorderQueueBody {
     from_position: usize,
     to_position: usize,
+}
+
+#[derive(serde::Deserialize)]
+struct SearchQueueQuery {
+    q: String,
+    scope: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct TrackSearchResponse {
+    scope: String,
+    results: Vec<TrackSearchResultResponse>,
+}
+
+#[derive(serde::Serialize, Clone)]
+struct TrackSearchResultResponse {
+    uri: String,
+    name: Option<String>,
+    artist: Option<String>,
+    album_art_url: Option<String>,
+    duration_ms: Option<u64>,
+    playlist_index: Option<usize>,
+    playlist_id: Option<String>,
+    playlist_name: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct AddQueueTrackBody {
+    playlist_index: usize,
+    track: AddQueueTrack,
+}
+
+#[derive(serde::Deserialize)]
+struct AddQueueTrack {
+    uri: String,
+    name: Option<String>,
+    artist: Option<String>,
+    album_art_url: Option<String>,
+    duration_ms: Option<u64>,
 }
 
 impl From<spotify::player::PlaybackState> for PlaybackResponse {
@@ -317,20 +358,18 @@ async fn skip_song(
 
     let advance = car::session::next_same_playlist(&session)
         .ok_or_else(|| err(StatusCode::UNPROCESSABLE_ENTITY, "playlist is empty"))?;
-    let preview_track = preview_next_track(&session, &advance);
-    let playback_uris = playback_uris(&advance.track_uri, preview_track.as_deref());
+    let playback_uris = playback_uris(&advance.track_uri, None);
 
     spotify::player::start_tracks(&access_token, &playback_uris)
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
 
-    db::car::update_position_and_track_and_set_queue(
+    db::car::update_position_and_track_and_clear_queue(
         &state.pool,
         session_id,
         advance.playlist_index,
         &advance.track_uri,
         &advance.track_indexes,
-        preview_track.as_deref(),
     )
     .await
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -354,20 +393,18 @@ async fn skip_turn(
 
     let advance = car::session::next_playlist(&session)
         .ok_or_else(|| err(StatusCode::UNPROCESSABLE_ENTITY, "playlist is empty"))?;
-    let preview_track = preview_next_track(&session, &advance);
-    let playback_uris = playback_uris(&advance.track_uri, preview_track.as_deref());
+    let playback_uris = playback_uris(&advance.track_uri, None);
 
     spotify::player::start_tracks(&access_token, &playback_uris)
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
 
-    db::car::update_position_and_track_and_set_queue(
+    db::car::update_position_and_track_and_clear_queue(
         &state.pool,
         session_id,
         advance.playlist_index,
         &advance.track_uri,
         &advance.track_indexes,
-        preview_track.as_deref(),
     )
     .await
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -467,6 +504,98 @@ async fn get_queue(
     Ok(Json(build_queue_response(&session)))
 }
 
+async fn search_queue_tracks(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<Uuid>,
+    Query(query): Query<SearchQueueQuery>,
+) -> ApiResult<TrackSearchResponse> {
+    let user_id = user_id_from_headers(&headers)?;
+    let session = get_verified_session(&state, session_id, user_id).await?;
+    let term = query.q.trim();
+    if term.len() < 2 {
+        return Ok(Json(TrackSearchResponse {
+            scope: query.scope.unwrap_or_else(|| "local".to_string()),
+            results: Vec::new(),
+        }));
+    }
+
+    let scope = query.scope.unwrap_or_else(|| "local".to_string());
+    let results = if scope == "spotify" {
+        let access_token = get_access_token(&state, user_id).await?;
+        spotify::playlist::search_tracks(&access_token, term)
+            .await
+            .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?
+            .into_iter()
+            .map(|track| TrackSearchResultResponse {
+                uri: track.uri,
+                name: Some(track.name),
+                artist: Some(track.artist),
+                album_art_url: track.album_art_url,
+                duration_ms: Some(track.duration_ms),
+                playlist_index: None,
+                playlist_id: None,
+                playlist_name: None,
+            })
+            .collect()
+    } else {
+        search_session_tracks(&session, term)
+    };
+
+    Ok(Json(TrackSearchResponse { scope, results }))
+}
+
+async fn add_queue_track(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<Uuid>,
+    Json(body): Json<AddQueueTrackBody>,
+) -> ApiResult<QueueResponse> {
+    let user_id = user_id_from_headers(&headers)?;
+    let mut session = get_verified_session(&state, session_id, user_id).await?;
+
+    let Some(playlist) = session.playlists.0.get_mut(body.playlist_index) else {
+        return Err(err(StatusCode::NOT_FOUND, "playlist not found"));
+    };
+
+    let current_index = session
+        .playlist_track_indexes
+        .get(body.playlist_index)
+        .copied()
+        .unwrap_or(0);
+    let track = db::car::PlaylistTrack {
+        uri: body.track.uri,
+        name: body.track.name,
+        artist: body.track.artist,
+        album_art_url: body.track.album_art_url,
+        duration_ms: body.track.duration_ms,
+    };
+    let new_current_index = insert_track_after_current(playlist, current_index, track);
+
+    if session.playlist_track_indexes.len() < session.playlists.0.len() {
+        session
+            .playlist_track_indexes
+            .resize(session.playlists.0.len(), 0);
+    }
+    session.playlist_track_indexes[body.playlist_index] = new_current_index;
+
+    db::car::update_playlists_and_track_indexes(
+        &state.pool,
+        session_id,
+        &session.playlists.0,
+        &session.playlist_track_indexes,
+    )
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let updated = db::car::get_session(&state.pool, session_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "session not found"))?;
+
+    Ok(Json(build_queue_response(&updated)))
+}
+
 async fn reorder_playlist_queue(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -503,12 +632,7 @@ async fn reorder_playlist_queue(
     };
 
     let item = playlist.order.remove(from_abs);
-    let adjusted_to = if from_abs < to_abs {
-        to_abs - 1
-    } else {
-        to_abs
-    };
-    playlist.order.insert(adjusted_to, item);
+    playlist.order.insert(to_abs, item);
 
     db::car::update_playlists(&state.pool, session_id, &session.playlists.0)
         .await
@@ -649,19 +773,6 @@ fn playback_uris(track_uri: &str, queued_track_uri: Option<&str>) -> Vec<String>
     uris
 }
 
-fn preview_next_track(
-    session: &db::car::CarSession,
-    advance: &car::session::Advance,
-) -> Option<String> {
-    let mut preview = session.clone();
-    preview.current_playlist_index = advance.playlist_index;
-    preview.current_track_uri = Some(advance.track_uri.clone());
-    preview.playlist_track_indexes = advance.track_indexes.clone();
-    preview.queued_track_uri = None;
-
-    car::session::next_playlist(&preview).map(|next| next.track_uri)
-}
-
 fn current_playlist(session: &db::car::CarSession) -> Option<&db::car::PlaylistState> {
     let index = usize::try_from(session.current_playlist_index).ok()?;
     session.playlists().get(index)
@@ -751,6 +862,78 @@ fn playlist_queue_items(
         position,
     })
     .collect()
+}
+
+fn search_session_tracks(
+    session: &db::car::CarSession,
+    term: &str,
+) -> Vec<TrackSearchResultResponse> {
+    let needle = term.to_lowercase();
+    let mut results = Vec::new();
+
+    for (playlist_index, playlist) in session.playlists().iter().enumerate() {
+        for track in &playlist.order {
+            let name = track.name.as_deref().unwrap_or("");
+            let artist = track.artist.as_deref().unwrap_or("");
+            if !name.to_lowercase().contains(&needle) && !artist.to_lowercase().contains(&needle) {
+                continue;
+            }
+
+            if results.iter().any(|r: &TrackSearchResultResponse| {
+                r.uri == track.uri && r.playlist_index == Some(playlist_index)
+            }) {
+                continue;
+            }
+
+            results.push(TrackSearchResultResponse {
+                uri: track.uri.clone(),
+                name: track.name.clone(),
+                artist: track.artist.clone(),
+                album_art_url: track.album_art_url.clone(),
+                duration_ms: track.duration_ms,
+                playlist_index: Some(playlist_index),
+                playlist_id: Some(playlist.id.clone()),
+                playlist_name: Some(playlist.name.clone()),
+            });
+
+            if results.len() >= 20 {
+                return results;
+            }
+        }
+    }
+
+    results
+}
+
+fn insert_track_after_current(
+    playlist: &mut db::car::PlaylistState,
+    current_index: i32,
+    track: db::car::PlaylistTrack,
+) -> i32 {
+    let current = usize::try_from(current_index)
+        .ok()
+        .filter(|index| *index < playlist.order.len())
+        .unwrap_or(0);
+
+    let source_index = playlist
+        .order
+        .iter()
+        .position(|candidate| candidate.uri == track.uri);
+
+    let mut adjusted_current = current;
+    let item = if let Some(source) = source_index.filter(|source| *source != current) {
+        let removed = playlist.order.remove(source);
+        if source < adjusted_current {
+            adjusted_current -= 1;
+        }
+        removed
+    } else {
+        track
+    };
+
+    let insert_at = (adjusted_current + 1).min(playlist.order.len());
+    playlist.order.insert(insert_at, item);
+    adjusted_current as i32
 }
 
 fn queue_positions(len: usize, current_index: i32) -> Vec<usize> {

@@ -268,6 +268,28 @@ pub async fn update_playlists(
     Ok(())
 }
 
+pub async fn update_playlists_and_track_indexes(
+    pool: &PgPool,
+    session_id: Uuid,
+    playlists: &[PlaylistState],
+    playlist_track_indexes: &[i32],
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE public.car_sessions
+        SET playlists = $1, playlist_track_indexes = $2, updated_at = now()
+        WHERE id = $3
+        "#,
+    )
+    .bind(Json(playlists))
+    .bind(playlist_track_indexes)
+    .bind(session_id)
+    .execute(pool)
+    .await
+    .context("updating playlists and track indexes")?;
+    Ok(())
+}
+
 pub async fn end_session(pool: &PgPool, session_id: Uuid) -> anyhow::Result<()> {
     sqlx::query(
         "UPDATE public.car_sessions SET is_active = false, updated_at = now() WHERE id = $1",

@@ -108,8 +108,8 @@ async fn run_inner(params: HeartbeatParams) -> anyhow::Result<()> {
 
         // Approaching end of track — queue the next one.
         if playback.duration_ms > 0 {
-            let pct = playback.progress_ms as f64 / playback.duration_ms as f64;
-            if pct > 0.85
+            let remaining_ms = playback.duration_ms.saturating_sub(playback.progress_ms);
+            if remaining_ms <= 5_000
                 && queued_for.as_deref() != Some(&playback.track_uri)
                 && session.queued_track_uri.is_none()
             {
