@@ -7,6 +7,7 @@ use axum::{
     Json, Router,
 };
 use serde_json::Value;
+use std::str::FromStr;
 use uuid::Uuid;
 
 use crate::AppState;
@@ -35,6 +36,7 @@ pub fn router() -> Router<AppState> {
         .route("/sessions/{id}/resume", post(resume_session))
         .route("/sessions/{id}/restart", post(restart_session))
         .route("/sessions/{id}/skip", post(skip_to_next))
+        .route("/sessions/{id}/mode", post(update_mode))
         .route("/sessions/{id}/queue", get(get_queue))
         .route("/sessions/{id}/queue/add", post(add_queue_track))
         .route("/sessions/{id}/queue/search", get(search_queue_tracks))
@@ -161,6 +163,11 @@ struct ReorderQueueBody {
 #[derive(serde::Deserialize)]
 struct RemoveQueueTrackBody {
     item_id: Uuid,
+}
+
+#[derive(serde::Deserialize)]
+struct UpdateModeBody {
+    mode: String,
 }
 
 #[derive(serde::Serialize)]
@@ -408,6 +415,24 @@ async fn get_queue(
     Ok(Json(build_queue_response(&state, session_id).await?))
 }
 
+async fn update_mode(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<Uuid>,
+    Json(body): Json<UpdateModeBody>,
+) -> ApiResult<SessionResponse> {
+    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    get_host_session(&state, session_id, user_id).await?;
+    let mode =
+        db::party::PartyMode::from_str(&body.mode).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
+
+    let session = db::party::set_mode(&state.pool, session_id, mode)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(session_response(session, user_id)))
+}
+
 async fn search_queue_tracks(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -495,7 +520,7 @@ async fn reorder_queue(
     Json(body): Json<ReorderQueueBody>,
 ) -> ApiResult<QueueResponse> {
     let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
-    get_host_session(&state, session_id, user_id).await?;
+    get_queue_editor_session(&state, session_id, user_id).await?;
 
     let items = db::party::queue_items(&state.pool, session_id)
         .await
@@ -522,7 +547,7 @@ async fn remove_queue_track(
     Json(body): Json<RemoveQueueTrackBody>,
 ) -> ApiResult<QueueResponse> {
     let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
-    get_host_session(&state, session_id, user_id).await?;
+    get_queue_editor_session(&state, session_id, user_id).await?;
 
     db::party::remove_queue_item(&state.pool, session_id, body.item_id)
         .await
@@ -702,6 +727,23 @@ async fn get_host_session(
         return Err(err(StatusCode::FORBIDDEN, "host controls only"));
     }
     Ok(session)
+}
+
+async fn get_queue_editor_session(
+    state: &AppState,
+    session_id: Uuid,
+    user_id: Uuid,
+) -> Result<db::party::PartySession, (StatusCode, Json<Value>)> {
+    let session = get_existing_session(state, session_id).await?;
+    if !session.is_active {
+        return Err(err(StatusCode::GONE, "party session has ended"));
+    }
+    if session.host_user_id == user_id || session.mode == db::party::PartyMode::SharedQueue.as_str()
+    {
+        return Ok(session);
+    }
+
+    Err(err(StatusCode::FORBIDDEN, "host controls only"))
 }
 
 fn session_response(session: db::party::PartySession, user_id: Uuid) -> SessionResponse {

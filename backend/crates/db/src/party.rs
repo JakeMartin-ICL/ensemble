@@ -49,6 +49,33 @@ pub struct NewPartyQueueItem {
     pub added_by_user_id: Uuid,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PartyMode {
+    OpenQueue,
+    SharedQueue,
+}
+
+impl PartyMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenQueue => "open_queue",
+            Self::SharedQueue => "shared_queue",
+        }
+    }
+}
+
+impl std::str::FromStr for PartyMode {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "open_queue" => Ok(Self::OpenQueue),
+            "shared_queue" => Ok(Self::SharedQueue),
+            _ => Err(anyhow::anyhow!("unsupported party mode")),
+        }
+    }
+}
+
 pub async fn create_session(pool: &PgPool, s: &NewPartySession) -> anyhow::Result<PartySession> {
     let session = sqlx::query_as::<_, PartySession>(
         r#"
@@ -142,6 +169,28 @@ pub async fn end_session(pool: &PgPool, session_id: Uuid) -> anyhow::Result<()> 
     .await
     .context("ending party session")?;
     Ok(())
+}
+
+pub async fn set_mode(
+    pool: &PgPool,
+    session_id: Uuid,
+    mode: PartyMode,
+) -> anyhow::Result<PartySession> {
+    let session = sqlx::query_as::<_, PartySession>(
+        r#"
+        UPDATE public.party_sessions
+        SET mode = $1, updated_at = now()
+        WHERE id = $2
+        RETURNING id, host_user_id, room_code, mode, current_track_uri, queued_track_uri,
+                  is_active, created_at, updated_at
+        "#,
+    )
+    .bind(mode.as_str())
+    .bind(session_id)
+    .fetch_one(pool)
+    .await
+    .context("updating party session mode")?;
+    Ok(session)
 }
 
 pub async fn set_current_track(

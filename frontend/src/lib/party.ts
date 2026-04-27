@@ -5,10 +5,12 @@ export interface PartySession {
   id: string
   host_user_id: string
   room_code: string
-  mode: 'open_queue'
+  mode: PartyMode
   current_track_uri: string | null
   is_host: boolean
 }
+
+export type PartyMode = 'open_queue' | 'shared_queue'
 
 export interface PartyQueueItem {
   id: string
@@ -55,6 +57,9 @@ export const restartPartySession = (id: string) =>
 
 export const skipPartySession = (id: string) =>
   post<PartySession>(`/party/sessions/${id}/skip`, {})
+
+export const updatePartyMode = (id: string, mode: PartyMode) =>
+  post<PartySession>(`/party/sessions/${id}/mode`, { mode })
 
 export const endPartySession = (id: string) =>
   post<{ ok: boolean }>(`/party/sessions/${id}/end`, {})

@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import QueueList from '../../components/QueueList'
 import { supabase } from '../../lib/supabase'
 import {
+  type PartyMode,
   type PartyQueueItem,
   type PartyQueueState,
   type PartySession,
@@ -20,6 +21,7 @@ import {
   resumePartySession,
   searchPartyTracks,
   skipPartySession,
+  updatePartyMode,
 } from '../../lib/party'
 import type { PlaybackState, TrackDetails, TrackSearchResult } from '../../lib/weave'
 import styles from '../car/Weave.module.css'
@@ -40,6 +42,8 @@ export default function PartySessionPage() {
   const [libraryLoading, setLibraryLoading] = useState(false)
   const [now, setNow] = useState(() => Date.now())
   const [copiedCode, setCopiedCode] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [savingMode, setSavingMode] = useState<PartyMode | null>(null)
   const [error, setError] = useState<string | null>(null)
   const pendingRemovedIdsRef = useRef<Set<string>>(new Set())
   const navigate = useNavigate()
@@ -168,7 +172,7 @@ export default function PartySessionPage() {
   }
 
   function handleReorder(item: PartyQueueItem, toPosition: number) {
-    if (!session?.is_host) return
+    if (!session || !canEditQueue(session)) return
     if (toPosition < 0 || toPosition >= queue.items.length) return
     setQueue(applyMove(queue, item.id, toPosition))
     void reorderPartyQueue(session.id, item.id, toPosition)
@@ -177,7 +181,7 @@ export default function PartySessionPage() {
   }
 
   function handleRemove(item: PartyQueueItem) {
-    if (!session?.is_host) return
+    if (!session || !canEditQueue(session)) return
     pendingRemovedIdsRef.current.add(item.id)
     setQueue(removeQueueItemOptimistic(queue, item.id))
     void removePartyQueueTrack(session.id, item.id)
@@ -230,6 +234,15 @@ export default function PartySessionPage() {
       .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
   }
 
+  function handleModeChange(mode: PartyMode) {
+    if (!session?.is_host || session.mode === mode || savingMode) return
+    setSavingMode(mode)
+    void updatePartyMode(session.id, mode)
+      .then((s) => { setSession(applyDevGuestOverride(s)) })
+      .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
+      .finally(() => { setSavingMode(null) })
+  }
+
   function handleCopyCode() {
     void navigator.clipboard.writeText(session?.room_code ?? '')
       .then(() => {
@@ -256,6 +269,7 @@ export default function PartySessionPage() {
         </div>
         <div className={`${styles.turnRow} ${styles.partyMetaRow}`}>
           <span className={styles.turnBadge}>{session.is_host ? 'Host' : 'Guest'}</span>
+          <span className={styles.turnBadge}>{modeLabel(session.mode)}</span>
           <button
             className={`${styles.turnBadge} ${styles.copyCodeBadge}`}
             onClick={handleCopyCode}
@@ -265,7 +279,26 @@ export default function PartySessionPage() {
           >
             {copiedCode ? 'Copied' : session.room_code}
           </button>
+          {session.is_host && (
+            <button
+              className={`${styles.turnBadge} ${styles.settingsBadge}`}
+              onClick={() => { setSettingsOpen((open) => !open) }}
+              type="button"
+              aria-label="Party settings"
+              title="Party settings"
+            >
+              <SettingsIcon />
+            </button>
+          )}
         </div>
+
+        {session.is_host && settingsOpen && (
+          <PartySettingsPanel
+            mode={session.mode}
+            savingMode={savingMode}
+            onModeChange={handleModeChange}
+          />
+        )}
 
         {session.is_host && (
           <>
@@ -300,15 +333,15 @@ export default function PartySessionPage() {
         )}
       </div>
 
-        <PartyQueuePanel
-          sessionId={session.id}
+      <PartyQueuePanel
+        sessionId={session.id}
         queue={queue}
-        isHost={session.is_host}
+        canEditQueue={canEditQueue(session)}
         libraryTracks={libraryTracks}
         libraryLoading={libraryLoading}
         onAddTrack={handleAdd}
-          onReorder={handleReorder}
-          onRemove={handleRemove}
+        onReorder={handleReorder}
+        onRemove={handleRemove}
       />
 
       {session.is_host ? (
@@ -339,7 +372,7 @@ function applyDevGuestOverride(session: PartySession): PartySession {
 function PartyQueuePanel({
   sessionId,
   queue,
-  isHost,
+  canEditQueue,
   libraryTracks,
   libraryLoading,
   onAddTrack,
@@ -348,7 +381,7 @@ function PartyQueuePanel({
 }: {
   sessionId: string
   queue: PartyQueueState
-  isHost: boolean
+  canEditQueue: boolean
   libraryTracks: TrackSearchResult[]
   libraryLoading: boolean
   onAddTrack: (item: TrackSearchResult) => Promise<void>
@@ -539,9 +572,9 @@ function PartyQueuePanel({
           items={queue.items}
           getKey={(item) => item.id}
           getColor={() => '#1db954'}
-          canReorder={isHost}
+          canReorder={canEditQueue}
           onReorder={onReorder}
-          onRemoveDrop={isHost ? onRemove : undefined}
+          onRemoveDrop={canEditQueue ? onRemove : undefined}
           removeDropLabel="Remove"
           renderItem={(item) => (
             <>
@@ -554,6 +587,47 @@ function PartyQueuePanel({
         />
       )}
     </section>
+  )
+}
+
+function PartySettingsPanel({
+  mode,
+  savingMode,
+  onModeChange,
+}: {
+  mode: PartyMode
+  savingMode: PartyMode | null
+  onModeChange: (mode: PartyMode) => void
+}) {
+  return (
+    <div className={styles.partySettingsPanel}>
+      <button
+        className={`${styles.partyModeOption}${mode === 'open_queue' ? ` ${styles.partyModeOptionActive}` : ''}`}
+        onClick={() => { onModeChange('open_queue') }}
+        disabled={savingMode !== null}
+        type="button"
+        aria-pressed={mode === 'open_queue'}
+      >
+        <span className={styles.partyModeIcon}><PlusIcon /></span>
+        <span>
+          <span className={styles.partyModeTitle}>Add only</span>
+          <span className={styles.partyModeMeta}>Guests add songs. Host shapes the queue.</span>
+        </span>
+      </button>
+      <button
+        className={`${styles.partyModeOption}${mode === 'shared_queue' ? ` ${styles.partyModeOptionActive}` : ''}`}
+        onClick={() => { onModeChange('shared_queue') }}
+        disabled={savingMode !== null}
+        type="button"
+        aria-pressed={mode === 'shared_queue'}
+      >
+        <span className={styles.partyModeIcon}><QueueEditIcon /></span>
+        <span>
+          <span className={styles.partyModeTitle}>Shared queue</span>
+          <span className={styles.partyModeMeta}>Everyone can add, reorder, and remove.</span>
+        </span>
+      </button>
+    </div>
   )
 }
 
@@ -585,6 +659,22 @@ function SearchIcon() {
   return (
     <IconSvg>
       <path d="M9.5 4a5.5 5.5 0 0 1 4.39 8.82l4.15 4.14-1.41 1.42-4.15-4.15A5.5 5.5 0 1 1 9.5 4zm0 2a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z" />
+    </IconSvg>
+  )
+}
+
+function SettingsIcon() {
+  return (
+    <IconSvg>
+      <path d="M19.4 13.5a7.8 7.8 0 0 0 .05-1 7.8 7.8 0 0 0-.05-1l2.05-1.6-2-3.46-2.42.98a7.46 7.46 0 0 0-1.73-1L14.93 3h-4l-.36 2.42a7.46 7.46 0 0 0-1.73 1l-2.42-.98-2 3.46 2.05 1.6a7.8 7.8 0 0 0-.05 1 7.8 7.8 0 0 0 .05 1L4.42 15.1l2 3.46 2.42-.98c.53.42 1.11.76 1.73 1l.36 2.42h4l.37-2.42c.62-.24 1.2-.58 1.73-1l2.42.98 2-3.46-2.05-1.6ZM13 15.5a3 3 0 1 1 0-6 3 3 0 0 1 0 6Z" />
+    </IconSvg>
+  )
+}
+
+function QueueEditIcon() {
+  return (
+    <IconSvg>
+      <path d="M4 6h10v2H4V6Zm0 5h16v2H4v-2Zm0 5h10v2H4v-2Zm13.3-9.7 1.4-1.4L22 8.2l-1.4 1.4-3.3-3.3Zm-1.4 1.4 3.3 3.3-5.2 5.2H10.7v-3.3l5.2-5.2Z" />
     </IconSvg>
   )
 }
@@ -664,4 +754,12 @@ function formatTime(ms: number): string {
   const minutes = Math.floor(totalSeconds / 60)
   const seconds = totalSeconds % 60
   return `${minutes.toString()}:${seconds.toString().padStart(2, '0')}`
+}
+
+function canEditQueue(session: PartySession): boolean {
+  return session.is_host || session.mode === 'shared_queue'
+}
+
+function modeLabel(mode: PartyMode): string {
+  return mode === 'shared_queue' ? 'Shared queue' : 'Add only'
 }
