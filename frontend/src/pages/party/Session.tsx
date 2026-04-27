@@ -43,9 +43,12 @@ export default function PartySessionPage() {
   const [now, setNow] = useState(() => Date.now())
   const [copiedCode, setCopiedCode] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [settingsVisible, setSettingsVisible] = useState(false)
   const [savingMode, setSavingMode] = useState<PartyMode | null>(null)
   const [error, setError] = useState<string | null>(null)
   const pendingRemovedIdsRef = useRef<Set<string>>(new Set())
+  const settingsButtonRef = useRef<HTMLButtonElement | null>(null)
+  const settingsPanelRef = useRef<HTMLDivElement | null>(null)
   const navigate = useNavigate()
 
   useEffect(() => {
@@ -129,6 +132,22 @@ export default function PartySessionPage() {
     const interval = window.setInterval(() => { setNow(Date.now()) }, 250)
     return () => { window.clearInterval(interval) }
   }, [])
+
+  useEffect(() => {
+    if (!settingsOpen) return
+
+    function handlePointerDown(e: PointerEvent) {
+      const target = e.target as Node
+      const clickedButton = settingsButtonRef.current?.contains(target) ?? false
+      const clickedPanel = settingsPanelRef.current?.contains(target) ?? false
+      if (!clickedButton && !clickedPanel) {
+        closeSettings()
+      }
+    }
+
+    document.addEventListener('pointerdown', handlePointerDown)
+    return () => { document.removeEventListener('pointerdown', handlePointerDown) }
+  }, [settingsOpen])
 
   useEffect(() => {
     if (!session?.is_host || !session.id) return
@@ -243,6 +262,20 @@ export default function PartySessionPage() {
       .finally(() => { setSavingMode(null) })
   }
 
+  function toggleSettings() {
+    if (settingsOpen) {
+      closeSettings()
+      return
+    }
+
+    setSettingsVisible(true)
+    setSettingsOpen(true)
+  }
+
+  function closeSettings() {
+    setSettingsOpen(false)
+  }
+
   function handleCopyCode() {
     void navigator.clipboard.writeText(session?.room_code ?? '')
       .then(() => {
@@ -267,38 +300,61 @@ export default function PartySessionPage() {
           <span className={styles.trackName}>{track?.name ?? 'Party queue'}</span>
           {track?.artist && <span className={styles.artistName}>{track.artist}</span>}
         </div>
-        <div className={`${styles.turnRow} ${styles.partyMetaRow}`}>
-          <span className={styles.turnBadge}>{session.is_host ? 'Host' : 'Guest'}</span>
-          <span className={styles.turnBadge}>{modeLabel(session.mode)}</span>
-          <button
-            className={`${styles.turnBadge} ${styles.copyCodeBadge}`}
-            onClick={handleCopyCode}
-            type="button"
-            aria-label="Copy room code"
-            title="Copy room code"
-          >
-            {copiedCode ? 'Copied' : session.room_code}
-          </button>
-          {session.is_host && (
+        <div className={styles.partySettingsCluster}>
+          <div className={`${styles.turnRow} ${styles.partyMetaRow}`}>
+            <span className={styles.turnBadge}>{session.is_host ? 'Host' : 'Guest'}</span>
+            <span className={styles.turnBadge}>{modeLabel(session.mode)}</span>
             <button
-              className={`${styles.turnBadge} ${styles.settingsBadge}`}
-              onClick={() => { setSettingsOpen((open) => !open) }}
+              className={`${styles.turnBadge} ${styles.copyCodeBadge}`}
+              onClick={handleCopyCode}
               type="button"
-              aria-label="Party settings"
-              title="Party settings"
+              aria-label="Copy room code"
+              title="Copy room code"
             >
-              <SettingsIcon />
+              {copiedCode ? 'Copied' : session.room_code}
             </button>
-          )}
-        </div>
+            {session.is_host && (
+              <button
+                ref={settingsButtonRef}
+                className={[
+                  styles.turnBadge,
+                  styles.settingsBadge,
+                  settingsOpen ? styles.settingsBadgeActive : '',
+                ].filter(Boolean).join(' ')}
+                onClick={toggleSettings}
+                type="button"
+                aria-label="Party settings"
+                title="Party settings"
+              >
+                <SettingsIcon />
+              </button>
+            )}
+          </div>
 
-        {session.is_host && settingsOpen && (
-          <PartySettingsPanel
-            mode={session.mode}
-            savingMode={savingMode}
-            onModeChange={handleModeChange}
-          />
-        )}
+          {session.is_host && (
+            <div
+              ref={settingsPanelRef}
+              className={[
+                styles.partySettingsSlot,
+                settingsVisible ? styles.partySettingsSlotOpen : '',
+                settingsVisible && !settingsOpen ? styles.partySettingsSlotClosing : '',
+              ].filter(Boolean).join(' ')}
+              onAnimationEnd={(e) => {
+                if (e.currentTarget !== e.target) return
+                if (!settingsOpen) setSettingsVisible(false)
+              }}
+            >
+              {settingsVisible && (
+                <PartySettingsPanel
+                  mode={session.mode}
+                  closing={!settingsOpen}
+                  savingMode={savingMode}
+                  onModeChange={handleModeChange}
+                />
+              )}
+            </div>
+          )}
+          </div>
 
         {session.is_host && (
           <>
@@ -592,15 +648,17 @@ function PartyQueuePanel({
 
 function PartySettingsPanel({
   mode,
+  closing,
   savingMode,
   onModeChange,
 }: {
   mode: PartyMode
+  closing: boolean
   savingMode: PartyMode | null
   onModeChange: (mode: PartyMode) => void
 }) {
   return (
-    <div className={styles.partySettingsPanel}>
+    <div className={`${styles.partySettingsPanel}${closing ? ` ${styles.partySettingsPanelClosing}` : ''}`}>
       <button
         className={`${styles.partyModeOption}${mode === 'open_queue' ? ` ${styles.partyModeOptionActive}` : ''}`}
         onClick={() => { onModeChange('open_queue') }}
@@ -665,9 +723,17 @@ function SearchIcon() {
 
 function SettingsIcon() {
   return (
-    <IconSvg>
-      <path d="M19.4 13.5a7.8 7.8 0 0 0 .05-1 7.8 7.8 0 0 0-.05-1l2.05-1.6-2-3.46-2.42.98a7.46 7.46 0 0 0-1.73-1L14.93 3h-4l-.36 2.42a7.46 7.46 0 0 0-1.73 1l-2.42-.98-2 3.46 2.05 1.6a7.8 7.8 0 0 0-.05 1 7.8 7.8 0 0 0 .05 1L4.42 15.1l2 3.46 2.42-.98c.53.42 1.11.76 1.73 1l.36 2.42h4l.37-2.42c.62-.24 1.2-.58 1.73-1l2.42.98 2-3.46-2.05-1.6ZM13 15.5a3 3 0 1 1 0-6 3 3 0 0 1 0 6Z" />
-    </IconSvg>
+    <svg
+      className={styles.settingsIconSvg}
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+    >
+      <path
+        fillRule="evenodd"
+        clipRule="evenodd"
+        d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2ZM12 15.25a3.25 3.25 0 1 0 0-6.5 3.25 3.25 0 0 0 0 6.5Z"
+      />
+    </svg>
   )
 }
 

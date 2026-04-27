@@ -444,8 +444,10 @@
 }
 
 .settingsBadge {
-  width: 28px;
-  height: 28px;
+  width: 34px;
+  height: 34px;
+  min-width: 34px;
+  min-height: 34px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -453,19 +455,53 @@
   background: transparent;
   color: var(--text-muted);
   border-color: var(--border);
+  border-radius: 50%;
   cursor: pointer;
 }
 
-.settingsBadge:hover {
+.settingsBadge:hover,
+.settingsBadgeActive {
   color: var(--text-h);
   border-color: var(--accent-border);
   background: var(--accent-bg);
+  box-shadow: 0 0 14px rgba(170, 59, 255, 0.16);
+}
+
+.settingsBadge:hover {
   transform: rotate(18deg);
 }
 
-.settingsBadge .iconSvg {
-  width: 15px;
-  height: 15px;
+.settingsIconSvg {
+  width: 20px;
+  height: 20px;
+  display: block;
+  flex: 0 0 auto;
+  fill: currentColor;
+  stroke: none;
+  overflow: visible;
+}
+
+.partySettingsCluster {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.partySettingsSlot {
+  width: 100%;
+  max-height: 0;
+  display: flex;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.partySettingsSlotOpen {
+  animation: partySettingsSlotIn 0.18s ease-out forwards;
+}
+
+.partySettingsSlotClosing {
+  animation: partySettingsSlotOut 0.18s ease-in forwards;
 }
 
 .partySettingsPanel {
@@ -473,6 +509,7 @@
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 8px;
+  margin-top: 24px;
   padding: 8px;
   border: 1px solid var(--border-subtle);
   border-radius: 14px;
@@ -482,6 +519,11 @@
     0 0 0 1px rgba(255, 255, 255, 0.02) inset;
   animation: partySettingsIn 0.18s ease-out;
   backdrop-filter: blur(14px);
+}
+
+.partySettingsPanelClosing {
+  animation: partySettingsOut 0.18s ease-in forwards;
+  pointer-events: none;
 }
 
 .partyModeOption {
@@ -564,6 +606,38 @@
   to {
     opacity: 1;
     transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes partySettingsSlotIn {
+  from {
+    max-height: 0;
+  }
+
+  to {
+    max-height: 244px;
+  }
+}
+
+@keyframes partySettingsSlotOut {
+  from {
+    max-height: 244px;
+  }
+
+  to {
+    max-height: 0;
+  }
+}
+
+@keyframes partySettingsOut {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+
+  to {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.98);
   }
 }
 
