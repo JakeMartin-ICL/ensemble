@@ -24,7 +24,7 @@ import {
   updatePartyMode,
 } from '../../lib/party'
 import type { PlaybackState, TrackDetails, TrackSearchResult } from '../../lib/weave'
-import styles from '../car/Weave.module.css'
+import styles from '../../styles/Mode.module.css'
 
 const PARTY_SESSION_KEY = 'party_session_id'
 const PARTY_GUEST_SESSION_KEY = 'party_guest_session_id'

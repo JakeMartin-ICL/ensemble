@@ -24,7 +24,7 @@ import {
   skipSong,
   skipTurn,
 } from '../../lib/weave'
-import styles from './Weave.module.css'
+import styles from '../../styles/Mode.module.css'
 
 const PLAYLIST_COLORS = [
   '#ff7675', // coral

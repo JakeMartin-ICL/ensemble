@@ -8,7 +8,7 @@ import {
   getActiveSession,
   getPlaylists,
 } from '../../lib/weave'
-import styles from './Weave.module.css'
+import styles from '../../styles/Mode.module.css'
 
 function PlusCircleIcon() {
   return (

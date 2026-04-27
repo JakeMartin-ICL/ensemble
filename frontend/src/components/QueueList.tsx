@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import styles from '../pages/car/Weave.module.css'
+import styles from '../styles/Mode.module.css'
 
 interface PositionedItem {
   position: number
