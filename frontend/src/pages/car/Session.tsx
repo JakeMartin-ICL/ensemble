@@ -1,10 +1,10 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
+import QueueList from '../../components/QueueList'
 import { supabase } from '../../lib/supabase'
 import {
   type PlaybackState,
-  type PlaylistQueue,
   type QueueItem,
   type QueueState,
   type Session,
@@ -25,9 +25,6 @@ import {
   skipTurn,
 } from '../../lib/weave'
 import styles from './Weave.module.css'
-
-// Flip to true to re-enable ↑↓ reorder buttons alongside drag.
-const SHOW_QUEUE_MOVE_BUTTONS = false as boolean
 
 const PLAYLIST_COLORS = [
   '#ff7675', // coral
@@ -406,6 +403,14 @@ function QueueIcon() {
   )
 }
 
+function SearchIcon() {
+  return (
+    <IconSvg>
+      <path d="M9.5 4a5.5 5.5 0 0 1 4.39 8.82l4.15 4.14-1.41 1.42-4.15-4.15A5.5 5.5 0 1 1 9.5 4zm0 2a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z" />
+    </IconSvg>
+  )
+}
+
 function SkipSongIcon() {
   return (
     <IconSvg>
@@ -512,12 +517,15 @@ function QueuePanel({
   return (
     <section className={styles.queuePanel}>
       <div className={styles.queueSearch}>
-        <input
-          className={styles.queueSearchInput}
-          value={query}
-          onChange={(e) => { setQuery(e.target.value) }}
-          placeholder="Search songs..."
-        />
+        <label className={styles.queueSearchField}>
+          <span className={styles.queueSearchIcon}><SearchIcon /></span>
+          <input
+            className={styles.queueSearchInput}
+            value={query}
+            onChange={(e) => { setQuery(e.target.value) }}
+            aria-label="Search songs"
+          />
+        </label>
 
         {query.trim().length >= 2 && (
           <div className={styles.queueSearchResults}>
@@ -653,305 +661,22 @@ function QueuePanel({
         <QueueList
           items={queue.unified}
           onReorder={onReorder}
-          playlistColors={playlistColors}
+          getKey={(item) => `${item.playlist_id}:${item.position.toString()}`}
+          getGroupKey={(item) => item.playlist_id}
+          getColor={(item) => playlistColors.get(item.playlist_id) ?? '#c084fc'}
+          renderItem={(item) => <TrackLabel item={item} />}
+          reorderScope="group"
         />
       ) : activePlaylist ? (
         <QueueList
           items={activePlaylist.items}
-          playlist={activePlaylist}
           onReorder={onReorder}
-          playlistColors={playlistColors}
+          getKey={(item) => `${item.playlist_id}:${item.position.toString()}`}
+          getColor={(item) => playlistColors.get(item.playlist_id) ?? '#c084fc'}
+          renderItem={(item) => <TrackLabel item={item} />}
         />
       ) : null}
     </section>
-  )
-}
-
-function QueueList({
-  items,
-  playlist,
-  onReorder,
-  playlistColors,
-}: {
-  items: QueueItem[]
-  playlist?: PlaylistQueue
-  onReorder: (item: QueueItem, toPosition: number) => void
-  playlistColors: Map<string, string>
-}) {
-  const [dragKey, setDragKey] = useState<string | null>(null)
-  const [dragDelta, setDragDelta] = useState(0)
-  const [insertIdx, setInsertIdx] = useState(0)
-
-  const itemElsRef = useRef<Map<string, HTMLElement>>(new Map())
-  const pointerIdRef = useRef<number | null>(null)
-  const holdTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const scrollRafRef = useRef<number | null>(null)
-  const dragRafRef = useRef<number | null>(null)
-  const dragKeyRef = useRef<string | null>(null)
-  const insertIdxRef = useRef(0)
-  const deltaPendingRef = useRef(0)
-  const startYRef = useRef(0)
-  const lastYRef = useRef(0)
-  const movedRef = useRef(false)
-  const draggedHeightRef = useRef(0)
-  const originalRectsRef = useRef<Map<string, DOMRect>>(new Map())
-  const scrollAtStartRef = useRef(0)
-
-  dragKeyRef.current = dragKey
-
-  function ikey(item: QueueItem) { return `${item.playlist_id}:${item.position.toString()}` }
-
-  // Partners = items that can swap with the dragged item.
-  // For a playlist tab: all other items. For unified: same-playlist items only.
-  function getPartners(draggedItem: QueueItem): QueueItem[] {
-    const dk = ikey(draggedItem)
-    if (playlist) return items.filter((x) => ikey(x) !== dk)
-    return items.filter((x) => x.playlist_id === draggedItem.playlist_id && ikey(x) !== dk)
-  }
-
-  // Where in the partners array would the dragged item be inserted based on pointer Y?
-  function computeInsertIdx(pointerY: number, draggedItem: QueueItem): number {
-    const partners = getPartners(draggedItem)
-    const scrollDelta = window.scrollY - scrollAtStartRef.current
-    for (let ci = 0; ci < partners.length; ci++) {
-      const r = originalRectsRef.current.get(ikey(partners[ci]))
-      if (!r) continue
-      if (pointerY < r.top - scrollDelta + r.height / 2) return ci
-    }
-    return partners.length
-  }
-
-  // How many pixels should a non-dragged item shift vertically?
-  // Each shifting partner moves to the slot vacated by its neighbour in the new order,
-  // so we use original rects rather than a fixed item height. This handles unified queues
-  // correctly where same-playlist items are N slots apart (N = playlist count).
-  function getShift(item: QueueItem, draggedItem: QueueItem, insertIdxVal: number): number {
-    const partners = getPartners(draggedItem)
-    const pi = partners.findIndex((x) => ikey(x) === ikey(item))
-    if (pi === -1) return 0
-    const cDrag = draggedItem.position
-    const ownRect = originalRectsRef.current.get(ikey(item))
-    if (!ownRect) return 0
-
-    if (cDrag < insertIdxVal && pi >= cDrag && pi < insertIdxVal) {
-      // Moving down: shift up to fill the slot of the predecessor in the new order.
-      const pred = pi === cDrag ? draggedItem : partners[pi - 1]
-      const predRect = originalRectsRef.current.get(ikey(pred))
-      return predRect ? predRect.top - ownRect.top : 0
-    }
-
-    if (cDrag > insertIdxVal && pi >= insertIdxVal && pi < cDrag) {
-      // Moving up: shift down to fill the slot of the successor in the new order.
-      const succ = pi === cDrag - 1 ? draggedItem : partners[pi + 1]
-      const succRect = originalRectsRef.current.get(ikey(succ))
-      return succRect ? succRect.top - ownRect.top : 0
-    }
-
-    return 0
-  }
-
-  function startAutoScroll() {
-    if (scrollRafRef.current !== null) cancelAnimationFrame(scrollRafRef.current)
-    const T = 80, S = 10
-    function tick() {
-      const y = lastYRef.current
-      if (y < T) window.scrollBy(0, -Math.round(((T - y) / T) * S))
-      else if (y > window.innerHeight - T) window.scrollBy(0, Math.round(((y - (window.innerHeight - T)) / T) * S))
-      scrollRafRef.current = requestAnimationFrame(tick)
-    }
-    scrollRafRef.current = requestAnimationFrame(tick)
-  }
-
-  function stopAutoScroll() {
-    if (scrollRafRef.current !== null) { cancelAnimationFrame(scrollRafRef.current); scrollRafRef.current = null }
-  }
-
-  function resetDrag() {
-    if (holdTimerRef.current !== null) { clearTimeout(holdTimerRef.current); holdTimerRef.current = null }
-    if (dragRafRef.current !== null) { cancelAnimationFrame(dragRafRef.current); dragRafRef.current = null }
-    pointerIdRef.current = null
-    movedRef.current = false
-    dragKeyRef.current = null
-    insertIdxRef.current = 0
-    deltaPendingRef.current = 0
-    setDragKey(null)
-    setDragDelta(0)
-    setInsertIdx(0)
-    stopAutoScroll()
-  }
-
-  useEffect(() => resetDrag, []) // cleanup on unmount
-
-  function activate(el: HTMLElement, item: QueueItem, pointerId: number) {
-    try { el.setPointerCapture(pointerId) } catch { /* ignore */ }
-
-    // Snapshot all item rects at drag start for stable hit-testing
-    const rect = el.getBoundingClientRect()
-    draggedHeightRef.current = rect.height
-    originalRectsRef.current.clear()
-    for (const [k, itemEl] of itemElsRef.current) {
-      originalRectsRef.current.set(k, itemEl.getBoundingClientRect())
-    }
-    scrollAtStartRef.current = window.scrollY
-
-    const k = ikey(item)
-    dragKeyRef.current = k
-    insertIdxRef.current = item.position // cDrag == item.position initially
-    setDragKey(k)
-    setDragDelta(0)
-    setInsertIdx(item.position)
-    startAutoScroll()
-  }
-
-  function handlePointerDown(e: React.PointerEvent<HTMLLIElement>, item: QueueItem) {
-    if ((e.target as HTMLElement).closest('button')) return
-    if (e.pointerType === 'mouse' && e.button !== 0) return
-
-    pointerIdRef.current = e.pointerId
-    startYRef.current = e.clientY
-    lastYRef.current = e.clientY
-    movedRef.current = false
-
-    const el = e.currentTarget
-    if (e.pointerType === 'touch') {
-      holdTimerRef.current = setTimeout(() => {
-        holdTimerRef.current = null
-        if (!movedRef.current && pointerIdRef.current === e.pointerId) activate(el, item, e.pointerId)
-      }, 350)
-    } else {
-      e.preventDefault()
-      activate(el, item, e.pointerId)
-    }
-  }
-
-  function handlePointerMove(e: React.PointerEvent<HTMLLIElement>, item: QueueItem) {
-    if (pointerIdRef.current !== e.pointerId) return
-    lastYRef.current = e.clientY
-
-    if (holdTimerRef.current !== null) {
-      if (Math.abs(e.clientY - startYRef.current) > 8) movedRef.current = true
-      return
-    }
-
-    if (!dragKeyRef.current || ikey(item) !== dragKeyRef.current) return
-
-    deltaPendingRef.current = e.clientY - startYRef.current
-
-    const draggedItem = items.find((x) => ikey(x) === dragKeyRef.current)
-    if (draggedItem) {
-      const newIdx = computeInsertIdx(e.clientY, draggedItem)
-      insertIdxRef.current = newIdx
-    }
-
-    // Batch updates to ~60fps via RAF
-    dragRafRef.current ??= requestAnimationFrame(() => {
-      dragRafRef.current = null
-      setDragDelta(deltaPendingRef.current)
-      setInsertIdx(insertIdxRef.current)
-    })
-  }
-
-  function handlePointerUp(e: React.PointerEvent<HTMLLIElement>, item: QueueItem) {
-    if (pointerIdRef.current !== e.pointerId) return
-
-    if (holdTimerRef.current !== null) {
-      clearTimeout(holdTimerRef.current)
-      holdTimerRef.current = null
-      pointerIdRef.current = null
-      movedRef.current = false
-      return
-    }
-
-    if (dragKeyRef.current && ikey(item) === dragKeyRef.current) {
-      const draggedItem = items.find((x) => ikey(x) === dragKeyRef.current)
-      const finalInsertIdx = insertIdxRef.current
-      if (draggedItem && finalInsertIdx !== draggedItem.position) {
-        onReorder(draggedItem, finalInsertIdx)
-      }
-    }
-
-    resetDrag()
-  }
-
-  function handlePointerCancel(e: React.PointerEvent<HTMLLIElement>) {
-    if (pointerIdRef.current !== e.pointerId) return
-    resetDrag()
-  }
-
-  function canMoveDown(item: QueueItem): boolean {
-    const total = playlist
-      ? playlist.items.length
-      : items.filter((x) => x.playlist_id === item.playlist_id).length
-    return item.position < total - 1
-  }
-
-  if (items.length === 0) return <p className={styles.queueEmpty}>Nothing queued</p>
-
-  const draggedItem = dragKey ? (items.find((x) => ikey(x) === dragKey) ?? null) : null
-
-  return (
-    <ol className={`${styles.queueList}${dragKey ? ` ${styles.queueListDragging}` : ''}`}>
-      {items.map((item) => {
-        const k = ikey(item)
-        const isDragging = dragKey === k
-        const isPartner = draggedItem != null && getPartners(draggedItem).some((p) => ikey(p) === k)
-        const isDimmed = draggedItem != null && !isDragging && !isPartner
-        const shiftY = !isDragging && draggedItem != null ? getShift(item, draggedItem, insertIdx) : 0
-
-        const itemStyle: React.CSSProperties = {
-          '--item-color': playlistColors.get(item.playlist_id) ?? '#c084fc',
-        } as React.CSSProperties
-
-        if (isDragging) {
-          itemStyle.transform = `translateY(${dragDelta.toString()}px) scale(1.03)`
-          itemStyle.zIndex = 10
-          itemStyle.position = 'relative'
-          itemStyle.transition = 'none'
-        } else if (shiftY !== 0) {
-          itemStyle.transform = `translateY(${shiftY.toString()}px)`
-        }
-
-        return (
-          <li
-            key={`${item.playlist_id}-${item.position.toString()}-${item.uri}`}
-            className={[
-              styles.queueItem,
-              isDragging ? styles.queueItemDragging : '',
-              isDimmed ? styles.queueItemDim : '',
-            ].filter(Boolean).join(' ')}
-            style={itemStyle}
-            ref={(el) => {
-              if (el) itemElsRef.current.set(k, el)
-              else itemElsRef.current.delete(k)
-            }}
-            onPointerDown={(e) => { handlePointerDown(e, item) }}
-            onPointerMove={(e) => { handlePointerMove(e, item) }}
-            onPointerUp={(e) => { handlePointerUp(e, item) }}
-            onPointerCancel={(e) => { handlePointerCancel(e) }}
-          >
-            <TrackLabel item={item} />
-            {SHOW_QUEUE_MOVE_BUTTONS && (
-              <div className={styles.queueMoveControls}>
-                <button
-                  className={styles.queueMoveBtn}
-                  onClick={() => { onReorder(item, item.position - 1) }}
-                  disabled={item.position === 0}
-                  aria-label="Move up"
-                  title="Move up"
-                >↑</button>
-                <button
-                  className={styles.queueMoveBtn}
-                  onClick={() => { onReorder(item, item.position + 1) }}
-                  disabled={!canMoveDown(item)}
-                  aria-label="Move down"
-                  title="Move down"
-                >↓</button>
-              </div>
-            )}
-          </li>
-        )
-      })}
-    </ol>
   )
 }
 

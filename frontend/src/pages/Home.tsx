@@ -98,6 +98,10 @@ function LoggedIn({ userId }: { userId: string }) {
           <span className={styles.modeName}>Weave</span>
           <span className={styles.modeDesc}>Take turns picking songs with a partner</span>
         </button>
+        <button className={styles.modeCard} onClick={() => { void navigate('/party') }}>
+          <span className={styles.modeName}>Party</span>
+          <span className={styles.modeDesc}>Share a room code and let guests add songs</span>
+        </button>
       </div>
     </div>
   )

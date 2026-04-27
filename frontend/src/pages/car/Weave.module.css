@@ -322,6 +322,19 @@
   transition: color 0.15s ease;
 }
 
+.devToggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.devToggle input {
+  accent-color: var(--accent);
+}
+
 .playlistRow:hover .pickState {
   color: var(--accent-light);
 }
@@ -405,6 +418,29 @@
   letter-spacing: 0.1em;
   text-transform: uppercase;
   transition: color 0.4s ease, border-color 0.4s ease, background 0.4s ease, box-shadow 0.4s ease;
+}
+
+.partyMetaRow {
+  gap: 6px;
+}
+
+.partyMetaRow .turnBadge {
+  padding: 4px 12px;
+  font-size: 10px;
+}
+
+.copyCodeBadge {
+  font-family: var(--sans);
+  background: transparent;
+  color: var(--text-muted);
+  border-color: var(--border);
+  cursor: pointer;
+}
+
+.copyCodeBadge:hover {
+  color: var(--text-h);
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
 }
 
 .progressPanel {
@@ -528,10 +564,31 @@
   gap: 8px;
 }
 
+.queueSearchField {
+  position: relative;
+  display: block;
+  width: 100%;
+}
+
+.queueSearchIcon {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  display: inline-flex;
+  color: var(--text-muted);
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.queueSearchIcon .iconSvg {
+  width: 17px;
+  height: 17px;
+}
+
 .queueSearchInput {
   width: 100%;
   min-width: 0;
-  padding: 10px 12px;
+  padding: 10px 12px 10px 38px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface-2);
@@ -730,6 +787,10 @@
   transition: border-color 0.15s ease, background 0.15s ease, opacity 0.15s ease, transform 0.2s ease;
 }
 
+.queueItemStatic {
+  cursor: default;
+}
+
 .queueItem:hover {
   background: var(--surface-3);
   border-color: var(--border-subtle);
@@ -811,6 +872,42 @@
 .queueMoveBtn:disabled {
   cursor: default;
   opacity: 0.25;
+}
+
+.queueRemoveDrop {
+  position: fixed;
+  left: 50%;
+  bottom: 92px;
+  z-index: 30;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-width: 148px;
+  height: 48px;
+  padding: 0 18px;
+  border: 1px solid rgba(248, 113, 113, 0.42);
+  border-radius: 999px;
+  background: rgba(127, 29, 29, 0.88);
+  color: #fecaca;
+  font-size: 18px;
+  font-weight: 800;
+  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.55);
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.queueRemoveDrop span {
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.queueRemoveDropHot {
+  background: rgba(220, 38, 38, 0.94);
+  color: #fff;
+  border-color: rgba(254, 202, 202, 0.82);
+  transform: translateX(-50%) scale(1.05);
 }
 
 .controls {

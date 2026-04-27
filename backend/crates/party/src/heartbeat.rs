@@ -1,8 +1,7 @@
-//! Car-mode heartbeat adapter.
+//! Party-mode heartbeat adapter.
 
 use db::PgPool;
 use playback::{BoxFuture, HeartbeatDriver};
-use tracing::warn;
 use uuid::Uuid;
 
 pub struct HeartbeatParams {
@@ -13,7 +12,7 @@ pub struct HeartbeatParams {
 }
 
 pub async fn run(params: HeartbeatParams) {
-    let driver = CarHeartbeat {
+    let driver = PartyHeartbeat {
         session_id: params.session_id,
         pool: params.pool,
     };
@@ -26,16 +25,16 @@ pub async fn run(params: HeartbeatParams) {
     .await;
 }
 
-struct CarHeartbeat {
+struct PartyHeartbeat {
     session_id: Uuid,
     pool: PgPool,
 }
 
-impl HeartbeatDriver for CarHeartbeat {
-    type Session = db::car::CarSession;
+impl HeartbeatDriver for PartyHeartbeat {
+    type Session = db::party::PartySession;
 
     fn label(&self) -> &'static str {
-        "weave"
+        "party"
     }
 
     fn session_id(&self) -> Uuid {
@@ -47,7 +46,7 @@ impl HeartbeatDriver for CarHeartbeat {
     }
 
     fn load_session(&self) -> BoxFuture<'_, anyhow::Result<Option<Self::Session>>> {
-        Box::pin(async move { db::car::get_session(&self.pool, self.session_id).await })
+        Box::pin(async move { db::party::get_session(&self.pool, self.session_id).await })
     }
 
     fn is_active(&self, session: &Self::Session) -> bool {
@@ -68,58 +67,40 @@ impl HeartbeatDriver for CarHeartbeat {
 
     fn sync_external_track<'a>(
         &'a self,
-        session: &'a Self::Session,
+        _session: &'a Self::Session,
         track_uri: &'a str,
     ) -> BoxFuture<'a, anyhow::Result<()>> {
         Box::pin(async move {
-            db::car::update_position_and_track_and_clear_queue(
-                &self.pool,
-                self.session_id,
-                session.current_playlist_index,
-                track_uri,
-                &session.playlist_track_indexes,
-            )
-            .await
+            db::party::set_current_track(&self.pool, self.session_id, Some(track_uri)).await
         })
     }
 
     fn promote_queued_track<'a>(
         &'a self,
-        session: &'a Self::Session,
+        _session: &'a Self::Session,
         track_uri: &'a str,
     ) -> BoxFuture<'a, anyhow::Result<()>> {
         Box::pin(async move {
-            if let Some(advance) = crate::session::next_playlist(session) {
-                db::car::update_position_and_track_and_clear_queue(
-                    &self.pool,
-                    self.session_id,
-                    advance.playlist_index,
-                    track_uri,
-                    &advance.track_indexes,
-                )
-                .await
-            } else {
-                warn!(
-                    "weave heartbeat: session {} has an empty playlist, cannot advance turn",
-                    self.session_id
-                );
-                Ok(())
-            }
+            db::party::remove_first_queue_item_by_uri(&self.pool, self.session_id, track_uri)
+                .await?;
+            db::party::set_current_track(&self.pool, self.session_id, Some(track_uri)).await
         })
     }
 
     fn next_track_uri<'a>(
         &'a self,
-        session: &'a Self::Session,
+        _session: &'a Self::Session,
     ) -> BoxFuture<'a, anyhow::Result<Option<String>>> {
-        Box::pin(
-            async move { Ok(crate::session::next_playlist(session).map(|next| next.track_uri)) },
-        )
+        Box::pin(async move {
+            Ok(db::party::first_queue_item(&self.pool, self.session_id)
+                .await?
+                .map(|item| item.track.uri.clone()))
+        })
     }
 
     fn set_queued_track<'a>(&'a self, track_uri: &'a str) -> BoxFuture<'a, anyhow::Result<()>> {
-        Box::pin(
-            async move { db::car::set_queued_track(&self.pool, self.session_id, track_uri).await },
-        )
+        Box::pin(async move {
+            db::party::set_queued_track(&self.pool, self.session_id, track_uri).await
+        })
     }
 }
