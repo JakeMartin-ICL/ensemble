@@ -314,11 +314,20 @@
 
 .pickState {
   margin-left: auto;
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--text-muted);
+  transition: color 0.15s ease;
+}
+
+.playlistRow:hover .pickState {
   color: var(--accent-light);
-  white-space: nowrap;
+}
+
+.playlistRowSelected .pickState {
+  color: var(--accent);
 }
 
 /* ── Session ── */

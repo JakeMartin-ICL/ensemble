@@ -10,6 +10,22 @@ import {
 } from '../../lib/weave'
 import styles from './Weave.module.css'
 
+function PlusCircleIcon() {
+  return (
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm5 11h-4v4h-2v-4H7v-2h4V7h2v4h4v2z" />
+    </svg>
+  )
+}
+
+function MinusCircleIcon() {
+  return (
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm5 11H7v-2h10v2z" />
+    </svg>
+  )
+}
+
 export default function WeaveHome() {
   const [active, setActive] = useState<Session | null | undefined>(undefined)
   const [error, setError] = useState<string | null>(null)
@@ -146,7 +162,9 @@ function SetupForm({ onStart }: { onStart: () => void }) {
                 <span className={styles.playlistName}>{p.name}</span>
                 <span className={styles.playlistMeta}>{p.track_count.toString()} tracks</span>
               </div>
-              <span className={styles.pickState}>{selectedIds.has(p.id) ? 'Selected' : 'Add'}</span>
+              <span className={styles.pickState}>
+                {selectedIds.has(p.id) ? <MinusCircleIcon /> : <PlusCircleIcon />}
+              </span>
             </button>
           </li>
         ))}
