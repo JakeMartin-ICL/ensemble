@@ -1,4 +1,4 @@
-//! Database queries for car mode sessions.
+//! Database queries for weave mode sessions.
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
@@ -65,7 +65,7 @@ impl<'de> serde::Deserialize<'de> for PlaylistTrack {
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
-pub struct CarSession {
+pub struct WeaveSession {
     pub id: Uuid,
     pub host_user_id: Uuid,
     pub playlists: Json<Vec<PlaylistState>>,
@@ -78,13 +78,13 @@ pub struct CarSession {
     pub updated_at: DateTime<Utc>,
 }
 
-impl CarSession {
+impl WeaveSession {
     pub fn playlists(&self) -> &[PlaylistState] {
         &self.playlists.0
     }
 }
 
-pub struct NewCarSession {
+pub struct NewWeaveSession {
     pub host_user_id: Uuid,
     pub playlists: Vec<PlaylistState>,
     pub current_playlist_index: i32,
@@ -93,11 +93,11 @@ pub struct NewCarSession {
     pub queued_track_uri: Option<String>,
 }
 
-pub async fn create_session(pool: &PgPool, s: &NewCarSession) -> anyhow::Result<CarSession> {
+pub async fn create_session(pool: &PgPool, s: &NewWeaveSession) -> anyhow::Result<WeaveSession> {
     let first_playlist = s
         .playlists
         .first()
-        .context("new car session must include at least one playlist")?;
+        .context("new weave session must include at least one playlist")?;
     let second_playlist = s.playlists.get(1).unwrap_or(first_playlist);
     let first_playlist_uris = first_playlist
         .order
@@ -110,9 +110,9 @@ pub async fn create_session(pool: &PgPool, s: &NewCarSession) -> anyhow::Result<
         .map(|track| track.uri.clone())
         .collect::<Vec<_>>();
 
-    let session = sqlx::query_as::<_, CarSession>(
+    let session = sqlx::query_as::<_, WeaveSession>(
         r#"
-        INSERT INTO public.car_sessions
+        INSERT INTO public.weave_sessions
             (host_user_id, playlist_a_id, playlist_b_id, playlist_a_name, playlist_b_name,
              playlist_a_order, playlist_b_order, playlists, current_playlist_index,
              playlist_track_indexes, current_track_uri, queued_track_uri)
@@ -135,19 +135,19 @@ pub async fn create_session(pool: &PgPool, s: &NewCarSession) -> anyhow::Result<
     .bind(&s.queued_track_uri)
     .fetch_one(pool)
     .await
-    .context("inserting car session")?;
+    .context("inserting weave session")?;
     Ok(session)
 }
 
 pub async fn get_active_session(
     pool: &PgPool,
     host_user_id: Uuid,
-) -> anyhow::Result<Option<CarSession>> {
-    let session = sqlx::query_as::<_, CarSession>(
+) -> anyhow::Result<Option<WeaveSession>> {
+    let session = sqlx::query_as::<_, WeaveSession>(
         r#"
         SELECT id, host_user_id, playlists, current_playlist_index, playlist_track_indexes,
                current_track_uri, queued_track_uri, is_active, created_at, updated_at
-        FROM public.car_sessions
+        FROM public.weave_sessions
         WHERE host_user_id = $1 AND is_active = true
         ORDER BY created_at DESC
         LIMIT 1
@@ -156,23 +156,23 @@ pub async fn get_active_session(
     .bind(host_user_id)
     .fetch_optional(pool)
     .await
-    .context("fetching active car session")?;
+    .context("fetching active weave session")?;
     Ok(session)
 }
 
-pub async fn get_session(pool: &PgPool, session_id: Uuid) -> anyhow::Result<Option<CarSession>> {
-    let session = sqlx::query_as::<_, CarSession>(
+pub async fn get_session(pool: &PgPool, session_id: Uuid) -> anyhow::Result<Option<WeaveSession>> {
+    let session = sqlx::query_as::<_, WeaveSession>(
         r#"
         SELECT id, host_user_id, playlists, current_playlist_index, playlist_track_indexes,
                current_track_uri, queued_track_uri, is_active, created_at, updated_at
-        FROM public.car_sessions
+        FROM public.weave_sessions
         WHERE id = $1
         "#,
     )
     .bind(session_id)
     .fetch_optional(pool)
     .await
-    .context("fetching car session")?;
+    .context("fetching weave session")?;
     Ok(session)
 }
 
@@ -185,7 +185,7 @@ pub async fn update_position_and_track_and_clear_queue(
 ) -> anyhow::Result<()> {
     sqlx::query(
         r#"
-        UPDATE public.car_sessions
+        UPDATE public.weave_sessions
         SET current_playlist_index = $1, current_track_uri = $2,
             playlist_track_indexes = $3, queued_track_uri = NULL, updated_at = now()
         WHERE id = $4
@@ -211,7 +211,7 @@ pub async fn update_position_and_track_and_set_queue(
 ) -> anyhow::Result<()> {
     sqlx::query(
         r#"
-        UPDATE public.car_sessions
+        UPDATE public.weave_sessions
         SET current_playlist_index = $1, current_track_uri = $2,
             playlist_track_indexes = $3, queued_track_uri = $4, updated_at = now()
         WHERE id = $5
@@ -235,7 +235,7 @@ pub async fn set_queued_track(
 ) -> anyhow::Result<()> {
     sqlx::query(
         r#"
-        UPDATE public.car_sessions
+        UPDATE public.weave_sessions
         SET queued_track_uri = $1, updated_at = now()
         WHERE id = $2
         "#,
@@ -255,7 +255,7 @@ pub async fn update_playlists(
 ) -> anyhow::Result<()> {
     sqlx::query(
         r#"
-        UPDATE public.car_sessions
+        UPDATE public.weave_sessions
         SET playlists = $1, updated_at = now()
         WHERE id = $2
         "#,
@@ -276,7 +276,7 @@ pub async fn update_playlists_and_track_indexes(
 ) -> anyhow::Result<()> {
     sqlx::query(
         r#"
-        UPDATE public.car_sessions
+        UPDATE public.weave_sessions
         SET playlists = $1, playlist_track_indexes = $2, updated_at = now()
         WHERE id = $3
         "#,
@@ -292,18 +292,18 @@ pub async fn update_playlists_and_track_indexes(
 
 pub async fn end_session(pool: &PgPool, session_id: Uuid) -> anyhow::Result<()> {
     sqlx::query(
-        "UPDATE public.car_sessions SET is_active = false, updated_at = now() WHERE id = $1",
+        "UPDATE public.weave_sessions SET is_active = false, updated_at = now() WHERE id = $1",
     )
     .bind(session_id)
     .execute(pool)
     .await
-    .context("ending car session")?;
+    .context("ending weave session")?;
     Ok(())
 }
 
 pub async fn deactivate_user_sessions(pool: &PgPool, host_user_id: Uuid) -> anyhow::Result<()> {
     sqlx::query(
-        "UPDATE public.car_sessions SET is_active = false, updated_at = now() WHERE host_user_id = $1 AND is_active = true",
+        "UPDATE public.weave_sessions SET is_active = false, updated_at = now() WHERE host_user_id = $1 AND is_active = true",
     )
     .bind(host_user_id)
     .execute(pool)

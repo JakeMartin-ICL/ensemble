@@ -1,4 +1,4 @@
-//! Car-mode heartbeat adapter.
+//! Weave-mode heartbeat adapter.
 
 use db::PgPool;
 use playback::{BoxFuture, HeartbeatDriver};
@@ -13,7 +13,7 @@ pub struct HeartbeatParams {
 }
 
 pub async fn run(params: HeartbeatParams) {
-    let driver = CarHeartbeat {
+    let driver = WeaveHeartbeat {
         session_id: params.session_id,
         pool: params.pool,
     };
@@ -26,13 +26,13 @@ pub async fn run(params: HeartbeatParams) {
     .await;
 }
 
-struct CarHeartbeat {
+struct WeaveHeartbeat {
     session_id: Uuid,
     pool: PgPool,
 }
 
-impl HeartbeatDriver for CarHeartbeat {
-    type Session = db::car::CarSession;
+impl HeartbeatDriver for WeaveHeartbeat {
+    type Session = db::weave::WeaveSession;
 
     fn label(&self) -> &'static str {
         "weave"
@@ -47,7 +47,7 @@ impl HeartbeatDriver for CarHeartbeat {
     }
 
     fn load_session(&self) -> BoxFuture<'_, anyhow::Result<Option<Self::Session>>> {
-        Box::pin(async move { db::car::get_session(&self.pool, self.session_id).await })
+        Box::pin(async move { db::weave::get_session(&self.pool, self.session_id).await })
     }
 
     fn is_active(&self, session: &Self::Session) -> bool {
@@ -72,7 +72,7 @@ impl HeartbeatDriver for CarHeartbeat {
         track_uri: &'a str,
     ) -> BoxFuture<'a, anyhow::Result<()>> {
         Box::pin(async move {
-            db::car::update_position_and_track_and_clear_queue(
+            db::weave::update_position_and_track_and_clear_queue(
                 &self.pool,
                 self.session_id,
                 session.current_playlist_index,
@@ -90,7 +90,7 @@ impl HeartbeatDriver for CarHeartbeat {
     ) -> BoxFuture<'a, anyhow::Result<()>> {
         Box::pin(async move {
             if let Some(advance) = crate::session::next_playlist(session) {
-                db::car::update_position_and_track_and_clear_queue(
+                db::weave::update_position_and_track_and_clear_queue(
                     &self.pool,
                     self.session_id,
                     advance.playlist_index,
@@ -118,8 +118,8 @@ impl HeartbeatDriver for CarHeartbeat {
     }
 
     fn set_queued_track<'a>(&'a self, track_uri: &'a str) -> BoxFuture<'a, anyhow::Result<()>> {
-        Box::pin(
-            async move { db::car::set_queued_track(&self.pool, self.session_id, track_uri).await },
-        )
+        Box::pin(async move {
+            db::weave::set_queued_track(&self.pool, self.session_id, track_uri).await
+        })
     }
 }

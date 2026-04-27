@@ -3,7 +3,7 @@ members = [
     "backend/crates/api",
     "backend/crates/spotify",
     "backend/crates/db",
-    "backend/crates/car",
+    "backend/crates/weave",
     "backend/crates/party",
     "backend/crates/playback",
 ]

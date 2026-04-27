@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
         .nest("/auth", routes::auth::router())
-        .nest("/car", routes::car::router())
+        .nest("/weave", routes::weave::router())
         .nest("/party", routes::party::router())
         .route("/me", get(routes::me::me))
         .layer(cors)

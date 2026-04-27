@@ -1,4 +1,4 @@
-//! Weave (car mode) endpoints.
+//! Weave (weave mode) endpoints.
 
 use axum::{
     extract::{Path, Query, State},
@@ -158,8 +158,8 @@ impl From<spotify::player::PlaybackState> for PlaybackResponse {
     }
 }
 
-impl From<db::car::CarSession> for SessionResponse {
-    fn from(s: db::car::CarSession) -> Self {
+impl From<db::weave::WeaveSession> for SessionResponse {
+    fn from(s: db::weave::WeaveSession) -> Self {
         let current = current_playlist(&s);
         let current_playlist_id = current.map(|p| p.id.clone()).unwrap_or_default();
         let current_playlist_name = current.map(|p| p.name.clone()).unwrap_or_default();
@@ -217,14 +217,14 @@ async fn get_access_token(
 }
 
 fn spawn_heartbeat(state: &AppState, session_id: Uuid) {
-    let params = car::heartbeat::HeartbeatParams {
+    let params = weave::heartbeat::HeartbeatParams {
         session_id,
         pool: state.pool.clone(),
         spotify_client_id: state.spotify_client_id.clone(),
         spotify_client_secret: state.spotify_client_secret.clone(),
     };
 
-    let fut = car::heartbeat::run(params);
+    let fut = weave::heartbeat::run(params);
     let handle = tokio::spawn(fut).abort_handle();
     state.heartbeat_tasks.insert(session_id, handle);
 }
@@ -259,7 +259,7 @@ async fn create_session(
         .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
 
         let mut order = tracks;
-        car::session::shuffle(&mut order);
+        weave::session::shuffle(&mut order);
 
         if order.is_empty() {
             return Err(err(
@@ -268,12 +268,12 @@ async fn create_session(
             ));
         }
 
-        playlists.push(db::car::PlaylistState {
+        playlists.push(db::weave::PlaylistState {
             id: playlist_id,
             name,
             order: order
                 .into_iter()
-                .map(|track| db::car::PlaylistTrack {
+                .map(|track| db::weave::PlaylistTrack {
                     uri: track.uri,
                     name: Some(track.name),
                     artist: Some(track.artist),
@@ -295,13 +295,13 @@ async fn create_session(
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
 
-    db::car::deactivate_user_sessions(&state.pool, user_id)
+    db::weave::deactivate_user_sessions(&state.pool, user_id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    let session = db::car::create_session(
+    let session = db::weave::create_session(
         &state.pool,
-        &db::car::NewCarSession {
+        &db::weave::NewWeaveSession {
             host_user_id: user_id,
             playlist_track_indexes: vec![0; playlists.len()],
             playlists,
@@ -325,7 +325,7 @@ async fn get_active_session(
 ) -> ApiResult<Option<SessionResponse>> {
     let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
 
-    let session = db::car::get_active_session(&state.pool, user_id)
+    let session = db::weave::get_active_session(&state.pool, user_id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
@@ -347,7 +347,7 @@ async fn skip_song(
     let session = get_verified_session(&state, session_id, user_id).await?;
     let access_token = get_access_token(&state, user_id).await?;
 
-    let advance = car::session::next_same_playlist(&session)
+    let advance = weave::session::next_same_playlist(&session)
         .ok_or_else(|| err(StatusCode::UNPROCESSABLE_ENTITY, "playlist is empty"))?;
     let playback_uris = playback_uris(&advance.track_uri, None);
 
@@ -355,7 +355,7 @@ async fn skip_song(
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
 
-    db::car::update_position_and_track_and_clear_queue(
+    db::weave::update_position_and_track_and_clear_queue(
         &state.pool,
         session_id,
         advance.playlist_index,
@@ -365,7 +365,7 @@ async fn skip_song(
     .await
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    let updated = db::car::get_session(&state.pool, session_id)
+    let updated = db::weave::get_session(&state.pool, session_id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "session not found"))?;
@@ -382,7 +382,7 @@ async fn skip_turn(
     let session = get_verified_session(&state, session_id, user_id).await?;
     let access_token = get_access_token(&state, user_id).await?;
 
-    let advance = car::session::next_playlist(&session)
+    let advance = weave::session::next_playlist(&session)
         .ok_or_else(|| err(StatusCode::UNPROCESSABLE_ENTITY, "playlist is empty"))?;
     let playback_uris = playback_uris(&advance.track_uri, None);
 
@@ -390,7 +390,7 @@ async fn skip_turn(
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
 
-    db::car::update_position_and_track_and_clear_queue(
+    db::weave::update_position_and_track_and_clear_queue(
         &state.pool,
         session_id,
         advance.playlist_index,
@@ -400,7 +400,7 @@ async fn skip_turn(
     .await
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    let updated = db::car::get_session(&state.pool, session_id)
+    let updated = db::weave::get_session(&state.pool, session_id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "session not found"))?;
@@ -554,7 +554,7 @@ async fn add_queue_track(
         .get(body.playlist_index)
         .copied()
         .unwrap_or(0);
-    let track = db::car::PlaylistTrack {
+    let track = db::weave::PlaylistTrack {
         uri: body.track.uri,
         name: body.track.name,
         artist: body.track.artist,
@@ -570,7 +570,7 @@ async fn add_queue_track(
     }
     session.playlist_track_indexes[body.playlist_index] = new_current_index;
 
-    db::car::update_playlists_and_track_indexes(
+    db::weave::update_playlists_and_track_indexes(
         &state.pool,
         session_id,
         &session.playlists.0,
@@ -579,7 +579,7 @@ async fn add_queue_track(
     .await
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    let updated = db::car::get_session(&state.pool, session_id)
+    let updated = db::weave::get_session(&state.pool, session_id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "session not found"))?;
@@ -625,11 +625,11 @@ async fn reorder_playlist_queue(
     let item = playlist.order.remove(from_abs);
     playlist.order.insert(to_abs, item);
 
-    db::car::update_playlists(&state.pool, session_id, &session.playlists.0)
+    db::weave::update_playlists(&state.pool, session_id, &session.playlists.0)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    let updated = db::car::get_session(&state.pool, session_id)
+    let updated = db::weave::get_session(&state.pool, session_id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "session not found"))?;
@@ -646,7 +646,7 @@ async fn end_session(
     tracing::debug!("end_session: session_id={session_id} user_id={user_id}");
     get_verified_session(&state, session_id, user_id).await?;
 
-    db::car::end_session(&state.pool, session_id)
+    db::weave::end_session(&state.pool, session_id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
@@ -725,8 +725,8 @@ async fn get_verified_session(
     state: &AppState,
     session_id: Uuid,
     user_id: Uuid,
-) -> Result<db::car::CarSession, (StatusCode, Json<Value>)> {
-    let session = db::car::get_session(&state.pool, session_id)
+) -> Result<db::weave::WeaveSession, (StatusCode, Json<Value>)> {
+    let session = db::weave::get_session(&state.pool, session_id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "session not found"))?;
@@ -764,12 +764,12 @@ fn playback_uris(track_uri: &str, queued_track_uri: Option<&str>) -> Vec<String>
     uris
 }
 
-fn current_playlist(session: &db::car::CarSession) -> Option<&db::car::PlaylistState> {
+fn current_playlist(session: &db::weave::WeaveSession) -> Option<&db::weave::PlaylistState> {
     let index = usize::try_from(session.current_playlist_index).ok()?;
     session.playlists().get(index)
 }
 
-fn build_queue_response(session: &db::car::CarSession) -> QueueResponse {
+fn build_queue_response(session: &db::weave::WeaveSession) -> QueueResponse {
     let playlists = session
         .playlists()
         .iter()
@@ -788,7 +788,7 @@ fn build_queue_response(session: &db::car::CarSession) -> QueueResponse {
     }
 }
 
-fn unified_queue_items(session: &db::car::CarSession, limit: usize) -> Vec<QueueItemResponse> {
+fn unified_queue_items(session: &db::weave::WeaveSession, limit: usize) -> Vec<QueueItemResponse> {
     let playlist_count = session.playlists().len();
     let Some(current_index) = usize::try_from(session.current_playlist_index)
         .ok()
@@ -822,7 +822,7 @@ fn unified_queue_items(session: &db::car::CarSession, limit: usize) -> Vec<Queue
 }
 
 fn playlist_queue_items(
-    session: &db::car::CarSession,
+    session: &db::weave::WeaveSession,
     playlist_index: usize,
     limit: usize,
 ) -> Vec<QueueItemResponse> {
@@ -856,7 +856,7 @@ fn playlist_queue_items(
 }
 
 fn search_session_tracks(
-    session: &db::car::CarSession,
+    session: &db::weave::WeaveSession,
     term: &str,
 ) -> Vec<TrackSearchResultResponse> {
     let needle = term.to_lowercase();
@@ -897,9 +897,9 @@ fn search_session_tracks(
 }
 
 fn insert_track_after_current(
-    playlist: &mut db::car::PlaylistState,
+    playlist: &mut db::weave::PlaylistState,
     current_index: i32,
-    track: db::car::PlaylistTrack,
+    track: db::weave::PlaylistTrack,
 ) -> i32 {
     let current = usize::try_from(current_index)
         .ok()

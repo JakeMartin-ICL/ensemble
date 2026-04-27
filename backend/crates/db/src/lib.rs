@@ -1,9 +1,9 @@
 //! Database access layer.
 //! Wraps sqlx pool and exposes typed queries for each domain.
 
-pub mod car;
 pub mod party;
 pub mod users;
+pub mod weave;
 
 pub use sqlx::PgPool;
 

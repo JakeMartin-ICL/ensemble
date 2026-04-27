@@ -25,5 +25,5 @@ dashmap = "6"
 tokio-util = { version = "0.7", features = ["rt"] }
 spotify = { path = "../spotify" }
 db = { path = "../db" }
-car = { path = "../car" }
+weave = { path = "../weave" }
 party = { path = "../party" }

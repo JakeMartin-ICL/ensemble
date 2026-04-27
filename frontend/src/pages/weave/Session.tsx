@@ -64,7 +64,7 @@ export default function WeaveSession() {
   useEffect(() => {
     void getActiveSession().then((s) => {
       if (!s) {
-        void navigate('/car')
+        void navigate('/weave')
         return
       }
       setSession(s)
@@ -79,7 +79,7 @@ export default function WeaveSession() {
     const interval = window.setInterval(() => {
       void getActiveSession().then((s) => {
         if (!s) {
-          void navigate('/car')
+          void navigate('/weave')
           return
         }
         setSession(s)
@@ -149,13 +149,13 @@ export default function WeaveSession() {
         {
           event: 'UPDATE',
           schema: 'public',
-          table: 'car_sessions',
+          table: 'weave_sessions',
           filter: `id=eq.${session.id}`,
         },
         () => {
           void getActiveSession().then((s) => {
             if (!s) {
-              void navigate('/car')
+              void navigate('/weave')
               return
             }
             setSession(s)
@@ -250,7 +250,7 @@ export default function WeaveSession() {
 
   function handleEnd() {
     if (!session) return
-    void endSession(session.id).then(() => navigate('/car')).catch((e: unknown) => {
+    void endSession(session.id).then(() => navigate('/weave')).catch((e: unknown) => {
       setError(e instanceof Error ? e.message : String(e))
     })
   }

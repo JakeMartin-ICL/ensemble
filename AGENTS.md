@@ -12,8 +12,8 @@ ensemble/
 │   ├── Dockerfile                 # builds the `api` binary; deploy via scripts/deploy-backend.sh
 │   └── crates/
 │       ├── api/       # Axum HTTP server — the deployable binary
-│       ├── car/       # Weave (car mode) business logic: turn advancement, shuffle, heartbeat
-│       ├── db/        # sqlx queries — one file per domain (users.rs, car.rs)
+│       ├── weave/     # Weave business logic: turn advancement, shuffle, heartbeat
+│       ├── db/        # sqlx queries — one file per domain (users.rs, weave.rs)
 │       ├── party/     # stub, not yet implemented
 │       └── spotify/   # Spotify API client: auth.rs, player.rs, playlist.rs
 ├── frontend/          # Vite + React PWA
@@ -25,16 +25,17 @@ ensemble/
 │       └── pages/
 │           ├── Home.tsx          # logged-out + logged-in home; mode selection
 │           ├── AuthCallback.tsx  # Spotify OAuth callback handler
-│           └── car/
+│           └── weave/
 │               ├── Setup.tsx          # WeaveHome: active session resume OR new session setup
-│               ├── Session.tsx        # WeaveSession: playback controls, queue editor, end session
-│               └── Weave.module.css   # Weave shared page styles
+│               └── Session.tsx        # WeaveSession: playback controls, queue editor, end session
+│       └── styles/
+│           └── Mode.module.css        # Shared mode page styles
 ├── supabase/
 │   └── migrations/
 │       ├── 0001_bootstrap.sql       # users table + RLS policies
-│       ├── 0002_car_mode.sql        # initial two-playlist car_sessions schema
-│       ├── 0003_car_queued_track.sql
-│       ├── 0004_car_n_playlists.sql # JSONB playlist state for 2+ playlists
+│       ├── 0002_car_mode.sql (historical, renamed by 0009_weave_rename.sql)        # initial two-playlist weave_sessions schema
+│       ├── 0003_car_queued_track.sql (historical)
+│       ├── 0004_car_n_playlists.sql (historical) # JSONB playlist state for 2+ playlists
 │       └── 0005_user_sessions.sql   # bearer session tokens for frontend auth
 ├── scripts/
 │   └── deploy-backend.sh  # docker build + push to ghcr.io/jakemartin-icl/ensemble
@@ -115,17 +116,17 @@ Token refresh is done opportunistically: if the access token expires in <60 seco
 
 `POST /auth/refresh` also exists for explicit token refresh and requires the bearer session token.
 
-### Weave (car mode) — how it works
+### Weave (weave mode) — how it works
 1. User picks two or more playlists
-2. Each playlist is fetched from Spotify, shuffled, and stored in `car_sessions.playlists` JSONB
-3. A heartbeat task (`car::heartbeat`) is spawned per session in a `tokio::spawn`; handles are stored in a `DashMap<Uuid, AbortHandle>` on `AppState`
+2. Each playlist is fetched from Spotify, shuffled, and stored in `weave_sessions.playlists` JSONB
+3. A heartbeat task (`weave::heartbeat`) is spawned per session in a `tokio::spawn`; handles are stored in a `DashMap<Uuid, AbortHandle>` on `AppState`
 4. Heartbeat polls every 5s: detects track changes, advances the active playlist index, and queues the next track when >85% through the current one
-5. Frontend subscribes to `car_sessions` realtime updates via Supabase to refresh UI
+5. Frontend subscribes to `weave_sessions` realtime updates via Supabase to refresh UI
 
 The old `playlist_a_*`, `playlist_b_*`, and `current_turn` columns still exist for migration compatibility, but current code should use `playlists`, `current_playlist_index`, and `playlist_track_indexes`.
 
 ### Weave queue editing
-The session screen has a queue panel backed by `/car/sessions/:id/queue`. It shows a unified interleaved queue plus per-playlist tabs. Users can:
+The session screen has a queue panel backed by `/weave/sessions/:id/queue`. It shows a unified interleaved queue plus per-playlist tabs. Users can:
 - Search within selected playlists (`scope=local`)
 - Search Spotify globally (`scope=spotify`)
 - Add a track to a specific playlist queue
@@ -143,10 +144,10 @@ When editing queue order, preserve the invariant that reordering only changes th
 - Playlist items can contain nulls (deleted tracks), so deserialize as `Vec<Option<...>>` and flatten
 
 ### RLS policies
-RLS is enabled on `users` and `car_sessions` but the Rust backend connects as `postgres` (superuser) so RLS is bypassed. The policies exist for Supabase dashboard safety and future use.
+RLS is enabled on `users` and `weave_sessions` but the Rust backend connects as `postgres` (superuser) so RLS is bypassed. The policies exist for Supabase dashboard safety and future use.
 
 ### Error formatting
-In `routes/car.rs`, the `err()` helper uses `{e:#?}` for server-error logs (full anyhow chain) and `{e}` for the JSON response body (top-level message only).
+In `routes/weave.rs`, the `err()` helper uses `{e:#?}` for server-error logs (full anyhow chain) and `{e}` for the JSON response body (top-level message only).
 
 ### React StrictMode
 In development, `useEffect` runs twice. The OAuth callback handler guards against double-execution with `if (!storedState) return` after reading from `sessionStorage`.
@@ -163,21 +164,21 @@ In development, `useEffect` runs twice. The OAuth callback handler guards agains
 - `GET /me` — returns `{ display_name, active_device }` for the requesting user
 
 **Weave** (all require `Authorization: Bearer <session_token>`):
-- `POST /car/sessions` — create session with `{ playlist_ids }` where at least two playlist IDs are required
-- `GET /car/sessions/active` — get active session or `null`
-- `POST /car/sessions/:id/skip-song` — advance within same playlist turn
-- `POST /car/sessions/:id/skip-turn` — switch to the next playlist in rotation
-- `GET /car/sessions/:id/playback` — get current Spotify playback state
-- `POST /car/sessions/:id/pause` — pause playback
-- `POST /car/sessions/:id/resume` — resume playback
-- `POST /car/sessions/:id/restart` — restart current track/session playback
-- `GET /car/sessions/:id/queue` — get unified and per-playlist queue previews
-- `POST /car/sessions/:id/queue/add` — add a track to a playlist queue
-- `GET /car/sessions/:id/queue/search?q=...&scope=local|spotify` — search queued playlist tracks or Spotify
-- `POST /car/sessions/:id/queue/:playlist_index/reorder` — reorder upcoming tracks within one playlist
-- `POST /car/sessions/:id/end` — mark session inactive, stop heartbeat
-- `GET /car/playlists` — list user's Spotify playlists
-- `GET /car/track/:uri` — get track details by Spotify URI (`spotify:track:...`, URL-encoded in path)
+- `POST /weave/sessions` — create session with `{ playlist_ids }` where at least two playlist IDs are required
+- `GET /weave/sessions/active` — get active session or `null`
+- `POST /weave/sessions/:id/skip-song` — advance within same playlist turn
+- `POST /weave/sessions/:id/skip-turn` — switch to the next playlist in rotation
+- `GET /weave/sessions/:id/playback` — get current Spotify playback state
+- `POST /weave/sessions/:id/pause` — pause playback
+- `POST /weave/sessions/:id/resume` — resume playback
+- `POST /weave/sessions/:id/restart` — restart current track/session playback
+- `GET /weave/sessions/:id/queue` — get unified and per-playlist queue previews
+- `POST /weave/sessions/:id/queue/add` — add a track to a playlist queue
+- `GET /weave/sessions/:id/queue/search?q=...&scope=local|spotify` — search queued playlist tracks or Spotify
+- `POST /weave/sessions/:id/queue/:playlist_index/reorder` — reorder upcoming tracks within one playlist
+- `POST /weave/sessions/:id/end` — mark session inactive, stop heartbeat
+- `GET /weave/playlists` — list user's Spotify playlists
+- `GET /weave/track/:uri` — get track details by Spotify URI (`spotify:track:...`, URL-encoded in path)
 
 ---
 
@@ -187,8 +188,8 @@ In development, `useEffect` runs twice. The OAuth callback handler guards agains
 |---|---|
 | `/` | `Home` — connect with Spotify, or mode selection when logged in |
 | `/auth/callback` | `AuthCallback` — handles Spotify redirect |
-| `/car` | `WeaveHome` (Setup.tsx) — resume active session or start a new one |
-| `/car/session` | `WeaveSession` (Session.tsx) — now-playing + controls |
+| `/weave` | `WeaveHome` (Setup.tsx) — resume active session or start a new one |
+| `/weave/session` | `WeaveSession` (Session.tsx) — now-playing + controls |
 
 ---
 
@@ -219,8 +220,8 @@ Frontend: Deployed on Vercel (see `vercel.json`).
 ## Known issues / recent work
 
 - **Bearer sessions**: Auth now uses `Authorization: Bearer <session_token>` instead of `X-User-Id`. Keep `user_id` in `localStorage` only for frontend logged-in checks unless that is redesigned.
-- **N-playlist Weave**: Session creation and queue logic now support two or more playlists via `car_sessions.playlists` JSONB. Avoid adding new behavior to only the legacy A/B columns.
-- **Queue panel**: The frontend has local/Spotify search, per-playlist add buttons, queue tabs, and reorder controls in `Session.tsx`; styles live in `Weave.module.css`.
-- **End session 404**: `POST /car/sessions/:id/end` intermittently returns 404 ("session not found"). Root cause not yet confirmed — added `tracing::debug!` logging to `end_session` handler; run with `RUST_LOG=debug` to see the session ID being queried. Errors are now surfaced in the Setup.tsx UI (the `onEnd` handler has a `.catch()`).
-- **Heartbeat empty playlist panic**: Fixed — `car::session::next_flip_turn` and `next_same_turn` now return `Option<Advance>` (returning `None` if the playlist order is empty) instead of panicking. Callers handle `None` gracefully.
+- **N-playlist Weave**: Session creation and queue logic now support two or more playlists via `weave_sessions.playlists` JSONB. Avoid adding new behavior to only the legacy A/B columns.
+- **Queue panel**: The frontend has local/Spotify search, per-playlist add buttons, queue tabs, and reorder controls in `Session.tsx`; shared mode styles live in `Mode.module.css`.
+- **End session 404**: `POST /weave/sessions/:id/end` intermittently returns 404 ("session not found"). Root cause not yet confirmed — added `tracing::debug!` logging to `end_session` handler; run with `RUST_LOG=debug` to see the session ID being queried. Errors are now surfaced in the Setup.tsx UI (the `onEnd` handler has a `.catch()`).
+- **Heartbeat empty playlist panic**: Fixed — `weave::session::next_flip_turn` and `next_same_turn` now return `Option<Advance>` (returning `None` if the playlist order is empty) instead of panicking. Callers handle `None` gracefully.
 - **`party` crate**: Scaffolded but not implemented. `routes::party` is commented out in `routes/mod.rs`.

@@ -74,35 +74,35 @@ export interface TrackSearchResponse {
 }
 
 export const getActiveSession = () =>
-  get<Session | null>('/car/sessions/active')
+  get<Session | null>('/weave/sessions/active')
 
 export const createSession = (playlist_ids: string[]) =>
-  post<Session>('/car/sessions', { playlist_ids })
+  post<Session>('/weave/sessions', { playlist_ids })
 
 export const skipSong = (id: string) =>
-  post<Session>(`/car/sessions/${id}/skip-song`, {})
+  post<Session>(`/weave/sessions/${id}/skip-song`, {})
 
 export const skipTurn = (id: string) =>
-  post<Session>(`/car/sessions/${id}/skip-turn`, {})
+  post<Session>(`/weave/sessions/${id}/skip-turn`, {})
 
 export const getPlayback = (id: string) =>
-  get<PlaybackState | null>(`/car/sessions/${id}/playback`)
+  get<PlaybackState | null>(`/weave/sessions/${id}/playback`)
 
 export const pauseSession = (id: string) =>
-  post<PlaybackState | null>(`/car/sessions/${id}/pause`, {})
+  post<PlaybackState | null>(`/weave/sessions/${id}/pause`, {})
 
 export const resumeSession = (id: string) =>
-  post<PlaybackState | null>(`/car/sessions/${id}/resume`, {})
+  post<PlaybackState | null>(`/weave/sessions/${id}/resume`, {})
 
 export const restartSession = (id: string) =>
-  post<PlaybackState | null>(`/car/sessions/${id}/restart`, {})
+  post<PlaybackState | null>(`/weave/sessions/${id}/restart`, {})
 
 export const getQueue = (id: string) =>
-  get<QueueState>(`/car/sessions/${id}/queue`)
+  get<QueueState>(`/weave/sessions/${id}/queue`)
 
 export const searchQueueTracks = (id: string, q: string, scope: 'local' | 'spotify') =>
   get<TrackSearchResponse>(
-    `/car/sessions/${id}/queue/search?q=${encodeURIComponent(q)}&scope=${scope}`,
+    `/weave/sessions/${id}/queue/search?q=${encodeURIComponent(q)}&scope=${scope}`,
   )
 
 export const addQueueTrack = (
@@ -111,7 +111,7 @@ export const addQueueTrack = (
   track: TrackSearchResult,
 ) =>
   post<QueueState>(
-    `/car/sessions/${id}/queue/add`,
+    `/weave/sessions/${id}/queue/add`,
     { playlist_index, track },
   )
 
@@ -122,15 +122,15 @@ export const reorderPlaylistQueue = (
   to_position: number,
 ) =>
   post<QueueState>(
-    `/car/sessions/${id}/queue/${playlist_index.toString()}/reorder`,
+    `/weave/sessions/${id}/queue/${playlist_index.toString()}/reorder`,
     { from_position, to_position },
   )
 
 export const endSession = (id: string) =>
-  post<{ ok: boolean }>(`/car/sessions/${id}/end`, {})
+  post<{ ok: boolean }>(`/weave/sessions/${id}/end`, {})
 
 export const getPlaylists = () =>
-  get<Playlist[]>('/car/playlists')
+  get<Playlist[]>('/weave/playlists')
 
 export const getTrack = (uri: string) =>
-  get<TrackDetails>(`/car/track/${encodeURIComponent(uri)}`)
+  get<TrackDetails>(`/weave/track/${encodeURIComponent(uri)}`)

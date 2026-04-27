@@ -94,7 +94,7 @@ function LoggedIn({ userId }: { userId: string }) {
       <h1 className={styles.title}>Ensemble</h1>
 
       <div className={styles.modeGrid}>
-        <button className={styles.modeCard} onClick={() => { void navigate('/car') }}>
+        <button className={styles.modeCard} onClick={() => { void navigate('/weave') }}>
           <span className={styles.modeName}>Weave</span>
           <span className={styles.modeDesc}>Take turns picking songs with a partner</span>
         </button>

@@ -1,6 +1,6 @@
 //! Turn advancement and shuffle logic.
 
-use db::car::CarSession;
+use db::weave::WeaveSession;
 
 /// Returns the track URI and updated indexes after advancing one step.
 /// Does not write to the database; the caller does that.
@@ -10,7 +10,7 @@ pub struct Advance {
     pub track_indexes: Vec<i32>,
 }
 
-pub fn next_same_playlist(session: &CarSession) -> Option<Advance> {
+pub fn next_same_playlist(session: &WeaveSession) -> Option<Advance> {
     let playlist_index = valid_playlist_index(session)?;
     let mut track_indexes = normalized_track_indexes(session);
     let playlist = session.playlists().get(playlist_index)?;
@@ -30,7 +30,7 @@ pub fn next_same_playlist(session: &CarSession) -> Option<Advance> {
     })
 }
 
-pub fn next_playlist(session: &CarSession) -> Option<Advance> {
+pub fn next_playlist(session: &WeaveSession) -> Option<Advance> {
     let current_index = valid_playlist_index(session)?;
     let playlist_count = session.playlists().len();
 
@@ -61,12 +61,12 @@ pub fn next_playlist(session: &CarSession) -> Option<Advance> {
     None
 }
 
-fn valid_playlist_index(session: &CarSession) -> Option<usize> {
+fn valid_playlist_index(session: &WeaveSession) -> Option<usize> {
     let index = usize::try_from(session.current_playlist_index).ok()?;
     (index < session.playlists().len()).then_some(index)
 }
 
-fn normalized_track_indexes(session: &CarSession) -> Vec<i32> {
+fn normalized_track_indexes(session: &WeaveSession) -> Vec<i32> {
     let mut indexes = session.playlist_track_indexes.clone();
     indexes.resize(session.playlists().len(), 0);
     indexes

@@ -47,7 +47,7 @@ export default function WeaveHome() {
     return (
       <ResumePrompt
         session={active}
-        onResume={() => void navigate('/car/session')}
+        onResume={() => void navigate('/weave/session')}
         onEnd={() => {
           void endSession(active.id)
             .then(() => { setActive(null); })
@@ -59,7 +59,7 @@ export default function WeaveHome() {
     )
   }
 
-  return <SetupForm onStart={() => void navigate('/car/session')} />
+  return <SetupForm onStart={() => void navigate('/weave/session')} />
 }
 
 function ResumePrompt({
