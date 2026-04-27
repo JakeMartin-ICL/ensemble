@@ -20,6 +20,9 @@ dotenvy = { workspace = true }
 anyhow = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+reqwest = { workspace = true }
+dashmap = "6"
+tokio-util = { version = "0.7", features = ["rt"] }
 spotify = { path = "../spotify" }
 db = { path = "../db" }
 car = { path = "../car" }

@@ -2,16 +2,19 @@
 //! POST /auth/callback - exchange code for tokens
 //! POST /auth/refresh  - refresh an access token
 
-use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
+use crate::AppState;
+use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
 use chrono::Utc;
 use serde_json::Value;
 use uuid::Uuid;
-use crate::AppState;
 
 type ApiResult<T> = Result<Json<T>, (StatusCode, Json<Value>)>;
 
 fn err(status: StatusCode, msg: impl std::fmt::Display) -> (StatusCode, Json<Value>) {
-    (status, Json(serde_json::json!({ "error": msg.to_string() })))
+    (
+        status,
+        Json(serde_json::json!({ "error": msg.to_string() })),
+    )
 }
 
 pub fn router() -> Router<AppState> {
@@ -49,9 +52,12 @@ async fn callback(
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
 
-    let refresh_token = tokens
-        .refresh_token
-        .ok_or_else(|| err(StatusCode::BAD_GATEWAY, "Spotify did not return a refresh token"))?;
+    let refresh_token = tokens.refresh_token.ok_or_else(|| {
+        err(
+            StatusCode::BAD_GATEWAY,
+            "Spotify did not return a refresh token",
+        )
+    })?;
 
     let token_expires_at = Utc::now() + chrono::Duration::seconds(tokens.expires_in as i64);
 
@@ -103,9 +109,14 @@ async fn refresh(
 
     let token_expires_at = Utc::now() + chrono::Duration::seconds(tokens.expires_in as i64);
 
-    db::users::update_tokens(&state.pool, body.user_id, &tokens.access_token, token_expires_at)
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    db::users::update_tokens(
+        &state.pool,
+        body.user_id,
+        &tokens.access_token,
+        token_expires_at,
+    )
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     Ok(Json(RefreshResponse {
         access_token: tokens.access_token,

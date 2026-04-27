@@ -1,15 +1,22 @@
 //! GET /me — return current user info from Spotify.
 
-use axum::{Json, extract::State, http::{HeaderMap, StatusCode}};
+use crate::AppState;
+use axum::{
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    Json,
+};
 use chrono::Utc;
 use serde_json::Value;
 use uuid::Uuid;
-use crate::AppState;
 
 type ApiResult<T> = Result<Json<T>, (StatusCode, Json<Value>)>;
 
 fn err(status: StatusCode, msg: impl std::fmt::Display) -> (StatusCode, Json<Value>) {
-    (status, Json(serde_json::json!({ "error": msg.to_string() })))
+    (
+        status,
+        Json(serde_json::json!({ "error": msg.to_string() })),
+    )
 }
 
 #[derive(serde::Serialize)]
@@ -39,9 +46,7 @@ pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "user not found"))?;
 
-    let access_token = if user
-        .token_expires_at
-        .signed_duration_since(Utc::now())
+    let access_token = if user.token_expires_at.signed_duration_since(Utc::now())
         < chrono::Duration::seconds(60)
     {
         let tokens = spotify::auth::refresh_token(

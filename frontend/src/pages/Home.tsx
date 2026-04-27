@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { get } from '../lib/api'
 import { supabase } from '../lib/supabase'
+import styles from './Home.module.css'
 
 interface MeResponse {
   display_name: string
@@ -37,8 +39,12 @@ function LoggedOut() {
   }
 
   return (
-    <div>
-      <button onClick={handleConnect}>Connect with Spotify</button>
+    <div className={styles.page}>
+      <h1 className={styles.title}>Ensemble</h1>
+      <p className={styles.subtitle}>Shared Spotify listening, your way.</p>
+      <button className={styles.spotifyBtn} onClick={handleConnect}>
+        Connect with Spotify
+      </button>
     </div>
   )
 }
@@ -46,7 +52,7 @@ function LoggedOut() {
 function LoggedIn({ userId }: { userId: string }) {
   const [me, setMe] = useState<MeResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [updatedAt, setUpdatedAt] = useState<string | null>(null)
+  const navigate = useNavigate()
 
   useEffect(() => {
     void get<MeResponse>('/me', { 'X-User-Id': userId })
@@ -62,8 +68,8 @@ function LoggedIn({ userId }: { userId: string }) {
       .on(
         'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: 'users', filter: `id=eq.${userId}` },
-        (payload) => {
-          setUpdatedAt(payload.new.updated_at as string)
+        () => {
+          void get<MeResponse>('/me', { 'X-User-Id': userId }).then(setMe)
         },
       )
       .subscribe()
@@ -76,21 +82,22 @@ function LoggedIn({ userId }: { userId: string }) {
   }
 
   return (
-    <div>
-      {error && <p>Error: {error}</p>}
-      {me && (
-        <div>
-          <p>Display name: {me.display_name}</p>
-          <p>
-            Active device:{' '}
-            {me.active_device
-              ? `${me.active_device.name} (${me.active_device.type})`
-              : 'No active device'}
-          </p>
-        </div>
-      )}
-      {updatedAt && <p>Last updated: {updatedAt}</p>}
-      <button onClick={handleLogout}>Log out</button>
+    <div className={styles.page}>
+      <div className={styles.header}>
+        <span className={styles.displayName}>{me?.display_name ?? '…'}</span>
+        <button className={styles.logoutBtn} onClick={handleLogout}>Log out</button>
+      </div>
+
+      {error && <p className={styles.error}>{error}</p>}
+
+      <h1 className={styles.title}>Ensemble</h1>
+
+      <div className={styles.modeGrid}>
+        <button className={styles.modeCard} onClick={() => { void navigate('/car') }}>
+          <span className={styles.modeName}>Weave</span>
+          <span className={styles.modeDesc}>Take turns picking songs with a partner</span>
+        </button>
+      </div>
     </div>
   )
 }

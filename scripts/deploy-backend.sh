@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-IMAGE="ghcr.io/jakemartin-icl/ensemble-backend"
+IMAGE="ghcr.io/jakemartin-icl/ensemble"
 TAG=$(git rev-parse --short HEAD)
 
 cd "$(git rev-parse --show-toplevel)"
