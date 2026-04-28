@@ -180,6 +180,27 @@
   background: var(--surface-2);
 }
 
+.pillGhostBtn {
+  width: auto;
+  min-height: 34px;
+  padding: 7px 13px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: border-color 0.18s ease, color 0.18s ease, background 0.18s ease;
+}
+
+.pillGhostBtn:hover {
+  border-color: rgba(255, 255, 255, 0.16);
+  color: var(--text-h);
+  background: var(--surface-2);
+}
+
 /* ── Playlist picker ── */
 
 .pickerHeader {
@@ -235,6 +256,19 @@
 .searchInput:focus {
   border-color: var(--accent-border);
   box-shadow: 0 0 0 3px rgba(170, 59, 255, 0.1);
+}
+
+.setupField {
+  display: grid;
+  gap: 7px;
+  width: 100%;
+  max-width: 440px;
+}
+
+.setupLabel {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .playlistList {
@@ -506,6 +540,7 @@
 
 .partySettingsPanel {
   width: min(420px, calc(100vw - 48px));
+  max-height: min(560px, calc(100vh - 220px));
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 8px;
@@ -519,6 +554,7 @@
     0 0 0 1px rgba(255, 255, 255, 0.02) inset;
   animation: partySettingsIn 0.18s ease-out;
   backdrop-filter: blur(14px);
+  overflow-y: auto;
 }
 
 .partySettingsPanelClosing {
@@ -561,6 +597,10 @@
   box-shadow: 0 0 20px rgba(170, 59, 255, 0.12) inset;
 }
 
+.partySettingOption {
+  grid-column: 1 / -1;
+}
+
 .partyModeIcon {
   width: 34px;
   height: 34px;
@@ -597,6 +637,22 @@
   line-height: 1.35;
 }
 
+.partySettingInput {
+  width: 72px;
+  margin-top: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text-h);
+  font: inherit;
+}
+
+.partySettingInput:focus {
+  outline: none;
+  border-color: var(--accent-border);
+}
+
 @keyframes partySettingsIn {
   from {
     opacity: 0;
@@ -615,13 +671,13 @@
   }
 
   to {
-    max-height: 244px;
+    max-height: 620px;
   }
 }
 
 @keyframes partySettingsSlotOut {
   from {
-    max-height: 244px;
+    max-height: 620px;
   }
 
   to {
@@ -844,9 +900,18 @@
 .queueSearchArt {
   width: 42px;
   height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   border-radius: 6px;
   object-fit: cover;
   background: var(--surface-3);
+}
+
+.queueSearchArt .iconSvg {
+  width: 20px;
+  height: 20px;
+  color: var(--text-muted);
 }
 
 .spotifyIconSvg {
@@ -1032,6 +1097,30 @@
   flex-direction: column;
   min-width: 0;
   gap: 2px;
+}
+
+.sourceQueueList {
+  display: grid;
+  gap: 8px;
+}
+
+.sourceQueueHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.sourceQueueItem {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: var(--surface-2);
 }
 
 .queueTrackName,

@@ -37,8 +37,14 @@ pub fn router() -> Router<AppState> {
         .route("/sessions/{id}/restart", post(restart_session))
         .route("/sessions/{id}/skip", post(skip_to_next))
         .route("/sessions/{id}/mode", post(update_mode))
+        .route("/sessions/{id}/settings", post(update_settings))
         .route("/sessions/{id}/queue", get(get_queue))
         .route("/sessions/{id}/queue/add", post(add_queue_track))
+        .route(
+            "/sessions/{id}/queue/add-playlist",
+            post(add_queue_playlist),
+        )
+        .route("/sessions/{id}/source-queue", get(get_source_queue))
         .route("/sessions/{id}/queue/search", get(search_queue_tracks))
         .route("/sessions/{id}/queue/reorder", post(reorder_queue))
         .route("/sessions/{id}/queue/remove", post(remove_queue_track))
@@ -78,8 +84,18 @@ struct SessionResponse {
     host_user_id: Uuid,
     room_code: String,
     mode: String,
+    allow_guest_playlist_adds: bool,
+    source_min_queue_size: i32,
+    add_added_tracks_to_source: bool,
     current_track_uri: Option<String>,
     is_host: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct CreateSessionBody {
+    source_playlist_id: Option<String>,
+    source_min_queue_size: Option<i32>,
+    add_added_tracks_to_source: Option<bool>,
 }
 
 #[derive(serde::Deserialize)]
@@ -100,6 +116,11 @@ struct QueueResponse {
     items: Vec<QueueItemResponse>,
 }
 
+#[derive(serde::Serialize)]
+struct SourceQueueResponse {
+    items: Vec<SourceQueueItemResponse>,
+}
+
 #[derive(serde::Serialize, Clone)]
 struct QueueItemResponse {
     id: Uuid,
@@ -112,9 +133,26 @@ struct QueueItemResponse {
     added_by_user_id: Option<Uuid>,
 }
 
+#[derive(serde::Serialize, Clone)]
+struct SourceQueueItemResponse {
+    id: Uuid,
+    uri: String,
+    name: Option<String>,
+    artist: Option<String>,
+    album_art_url: Option<String>,
+    duration_ms: Option<u64>,
+    position: usize,
+    deferred: bool,
+}
+
 #[derive(serde::Deserialize)]
 struct AddQueueTrackBody {
     track: AddQueueTrack,
+}
+
+#[derive(serde::Deserialize)]
+struct AddQueuePlaylistBody {
+    playlist_id: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -140,6 +178,7 @@ struct LibraryTracksQuery {
 #[derive(serde::Serialize)]
 struct TrackSearchResponse {
     results: Vec<TrackSearchResultResponse>,
+    playlists: Vec<PlaylistSearchResultResponse>,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -152,6 +191,14 @@ struct TrackSearchResultResponse {
     playlist_index: Option<usize>,
     playlist_id: Option<String>,
     playlist_name: Option<String>,
+}
+
+#[derive(serde::Serialize, Clone)]
+struct PlaylistSearchResultResponse {
+    id: String,
+    name: String,
+    track_count: u32,
+    image_url: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -168,6 +215,13 @@ struct RemoveQueueTrackBody {
 #[derive(serde::Deserialize)]
 struct UpdateModeBody {
     mode: String,
+}
+
+#[derive(serde::Deserialize)]
+struct UpdateSettingsBody {
+    allow_guest_playlist_adds: Option<bool>,
+    source_min_queue_size: Option<i32>,
+    add_added_tracks_to_source: Option<bool>,
 }
 
 #[derive(serde::Serialize)]
@@ -226,8 +280,10 @@ async fn get_access_token(
 async fn create_session(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Json(body): Json<CreateSessionBody>,
 ) -> ApiResult<SessionResponse> {
     let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    let source_min_queue_size = body.source_min_queue_size.unwrap_or(0).clamp(0, 25);
 
     db::party::deactivate_user_sessions(&state.pool, user_id)
         .await
@@ -241,14 +297,23 @@ async fn create_session(
             &db::party::NewPartySession {
                 host_user_id: user_id,
                 room_code,
+                source_min_queue_size,
+                add_added_tracks_to_source: body.add_added_tracks_to_source.unwrap_or(false),
             },
         )
         .await
         {
             Ok(session) => {
+                if let Some(playlist_id) = body.source_playlist_id.as_deref() {
+                    seed_source_playlist(&state, user_id, session.id, playlist_id).await?;
+                    db::party::refill_queue_from_source(&state.pool, session.id)
+                        .await
+                        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+                }
                 stop_heartbeat(&state, session.id);
                 spawn_heartbeat(&state, session.id);
-                return Ok(Json(session_response(session, user_id)));
+                let updated = get_existing_session(&state, session.id).await?;
+                return Ok(Json(session_response(updated, user_id)));
             }
             Err(e) => last_error = Some(e),
         }
@@ -388,6 +453,9 @@ async fn skip_to_next(
     let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
     let session = get_host_session(&state, session_id, user_id).await?;
     let access_token = get_access_token(&state, session.host_user_id).await?;
+    db::party::refill_queue_from_source(&state.pool, session_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let item = db::party::pop_next_queue_item(&state.pool, session_id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
@@ -398,6 +466,9 @@ async fn skip_to_next(
         .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
 
     db::party::set_current_track(&state.pool, session_id, Some(&item.track.uri))
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    db::party::refill_queue_from_source(&state.pool, session_id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
@@ -412,6 +483,9 @@ async fn get_queue(
 ) -> ApiResult<QueueResponse> {
     crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
     get_existing_session(&state, session_id).await?;
+    db::party::refill_queue_from_source(&state.pool, session_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(build_queue_response(&state, session_id).await?))
 }
 
@@ -433,6 +507,45 @@ async fn update_mode(
     Ok(Json(session_response(session, user_id)))
 }
 
+async fn update_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<Uuid>,
+    Json(body): Json<UpdateSettingsBody>,
+) -> ApiResult<SessionResponse> {
+    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    get_host_session(&state, session_id, user_id).await?;
+    if let Some(allow_guest_playlist_adds) = body.allow_guest_playlist_adds {
+        db::party::set_allow_guest_playlist_adds(
+            &state.pool,
+            session_id,
+            allow_guest_playlist_adds,
+        )
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    }
+    if body.source_min_queue_size.is_some() || body.add_added_tracks_to_source.is_some() {
+        let existing = get_existing_session(&state, session_id).await?;
+        db::party::set_source_settings(
+            &state.pool,
+            session_id,
+            body.source_min_queue_size
+                .unwrap_or(existing.source_min_queue_size)
+                .clamp(0, 25),
+            body.add_added_tracks_to_source
+                .unwrap_or(existing.add_added_tracks_to_source),
+        )
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        db::party::refill_queue_from_source(&state.pool, session_id)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    }
+
+    let updated = get_existing_session(&state, session_id).await?;
+    Ok(Json(session_response(updated, user_id)))
+}
+
 async fn search_queue_tracks(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -447,6 +560,7 @@ async fn search_queue_tracks(
     if term.len() < 2 {
         return Ok(Json(TrackSearchResponse {
             results: Vec::new(),
+            playlists: Vec::new(),
         }));
     }
 
@@ -472,8 +586,15 @@ async fn search_queue_tracks(
             .await
             .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?
     };
+    let playlists = if scope == "spotify" {
+        Vec::new()
+    } else {
+        search_user_playlists(&access_token, term)
+            .await
+            .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?
+    };
 
-    Ok(Json(TrackSearchResponse { results }))
+    Ok(Json(TrackSearchResponse { results, playlists }))
 }
 
 async fn add_queue_track(
@@ -491,26 +612,88 @@ async fn add_queue_track(
     let position = db::party::next_position(&state.pool, session_id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let track = db::party::PartyTrack {
+        uri: body.track.uri,
+        name: body.track.name,
+        artist: body.track.artist,
+        album_art_url: body.track.album_art_url,
+        duration_ms: body.track.duration_ms,
+    };
 
     db::party::add_queue_item(
         &state.pool,
         &db::party::NewPartyQueueItem {
             session_id,
             position,
-            added_by_user_id: user_id,
-            track: db::party::PartyTrack {
-                uri: body.track.uri,
-                name: body.track.name,
-                artist: body.track.artist,
-                album_art_url: body.track.album_art_url,
-                duration_ms: body.track.duration_ms,
-            },
+            added_by_user_id: Some(user_id),
+            track: track.clone(),
         },
     )
     .await
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
+    if session.add_added_tracks_to_source {
+        db::party::defer_source_queue_track(&state.pool, session_id, &track, user_id)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    }
+
     Ok(Json(build_queue_response(&state, session_id).await?))
+}
+
+async fn add_queue_playlist(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<Uuid>,
+    Json(body): Json<AddQueuePlaylistBody>,
+) -> ApiResult<QueueResponse> {
+    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    let session = get_playlist_adder_session(&state, session_id, user_id).await?;
+    if !session.is_active {
+        return Err(err(StatusCode::GONE, "party session has ended"));
+    }
+
+    let access_token = get_access_token(&state, user_id).await?;
+    let tracks = spotify::playlist::get_tracks(&access_token, &body.playlist_id)
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?
+        .into_iter()
+        .map(|track| db::party::PartyTrack {
+            uri: track.uri,
+            name: Some(track.name),
+            artist: Some(track.artist),
+            album_art_url: track.album_art_url,
+            duration_ms: Some(track.duration_ms),
+        })
+        .collect::<Vec<_>>();
+
+    if tracks.is_empty() {
+        return Err(err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "playlist has no playable Spotify tracks",
+        ));
+    }
+
+    let mut tracks = tracks;
+    weave::session::shuffle(&mut tracks);
+    db::party::append_source_queue_items(&state.pool, session_id, &tracks, user_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    db::party::refill_queue_from_source(&state.pool, session_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(build_queue_response(&state, session_id).await?))
+}
+
+async fn get_source_queue(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<Uuid>,
+) -> ApiResult<SourceQueueResponse> {
+    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    get_host_session(&state, session_id, user_id).await?;
+    Ok(Json(build_source_queue_response(&state, session_id).await?))
 }
 
 async fn reorder_queue(
@@ -552,6 +735,9 @@ async fn remove_queue_track(
     db::party::remove_queue_item(&state.pool, session_id, body.item_id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    db::party::refill_queue_from_source(&state.pool, session_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     Ok(Json(build_queue_response(&state, session_id).await?))
 }
@@ -570,8 +756,11 @@ async fn get_library_tracks(
     let results = user_playlist_tracks(&access_token, limit)
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
+    let playlists = user_playlists(&access_token)
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
 
-    Ok(Json(TrackSearchResponse { results }))
+    Ok(Json(TrackSearchResponse { results, playlists }))
 }
 
 async fn end_session(
@@ -640,6 +829,63 @@ async fn build_queue_response(
     Ok(QueueResponse { items })
 }
 
+async fn build_source_queue_response(
+    state: &AppState,
+    session_id: Uuid,
+) -> Result<SourceQueueResponse, (StatusCode, Json<Value>)> {
+    let items = db::party::source_queue_items(&state.pool, session_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .into_iter()
+        .enumerate()
+        .map(|(position, item)| SourceQueueItemResponse {
+            id: item.id,
+            uri: item.track.uri.clone(),
+            name: item.track.name.clone(),
+            artist: item.track.artist.clone(),
+            album_art_url: item.track.album_art_url.clone(),
+            duration_ms: item.track.duration_ms,
+            position,
+            deferred: item.position < 0,
+        })
+        .collect();
+
+    Ok(SourceQueueResponse { items })
+}
+
+async fn seed_source_playlist(
+    state: &AppState,
+    user_id: Uuid,
+    session_id: Uuid,
+    playlist_id: &str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let access_token = get_access_token(state, user_id).await?;
+    let mut tracks = spotify::playlist::get_tracks(&access_token, playlist_id)
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?
+        .into_iter()
+        .map(|track| db::party::PartyTrack {
+            uri: track.uri,
+            name: Some(track.name),
+            artist: Some(track.artist),
+            album_art_url: track.album_art_url,
+            duration_ms: Some(track.duration_ms),
+        })
+        .collect::<Vec<_>>();
+
+    if tracks.is_empty() {
+        return Err(err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "playlist has no playable Spotify tracks",
+        ));
+    }
+
+    weave::session::shuffle(&mut tracks);
+    db::party::append_source_queue_items(&state.pool, session_id, &tracks, user_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
 async fn search_user_playlist_tracks(
     access_token: &str,
     term: &str,
@@ -661,6 +907,32 @@ async fn search_user_playlist_tracks(
     }
 
     Ok(results)
+}
+
+async fn search_user_playlists(
+    access_token: &str,
+    term: &str,
+) -> anyhow::Result<Vec<PlaylistSearchResultResponse>> {
+    let needle = term.to_lowercase();
+    Ok(user_playlists(access_token)
+        .await?
+        .into_iter()
+        .filter(|playlist| playlist.name.to_lowercase().contains(&needle))
+        .take(10)
+        .collect())
+}
+
+async fn user_playlists(access_token: &str) -> anyhow::Result<Vec<PlaylistSearchResultResponse>> {
+    Ok(spotify::playlist::get_user_playlists(access_token)
+        .await?
+        .into_iter()
+        .map(|playlist| PlaylistSearchResultResponse {
+            id: playlist.id,
+            name: playlist.name,
+            track_count: playlist.track_count,
+            image_url: playlist.image_url,
+        })
+        .collect())
 }
 
 async fn user_playlist_tracks(
@@ -746,6 +1018,19 @@ async fn get_queue_editor_session(
     Err(err(StatusCode::FORBIDDEN, "host controls only"))
 }
 
+async fn get_playlist_adder_session(
+    state: &AppState,
+    session_id: Uuid,
+    user_id: Uuid,
+) -> Result<db::party::PartySession, (StatusCode, Json<Value>)> {
+    let session = get_existing_session(state, session_id).await?;
+    if session.host_user_id == user_id || session.allow_guest_playlist_adds {
+        return Ok(session);
+    }
+
+    Err(err(StatusCode::FORBIDDEN, "host controls only"))
+}
+
 fn session_response(session: db::party::PartySession, user_id: Uuid) -> SessionResponse {
     let is_host = session.host_user_id == user_id;
     SessionResponse {
@@ -753,6 +1038,9 @@ fn session_response(session: db::party::PartySession, user_id: Uuid) -> SessionR
         host_user_id: session.host_user_id,
         room_code: session.room_code,
         mode: session.mode,
+        allow_guest_playlist_adds: session.allow_guest_playlist_adds,
+        source_min_queue_size: session.source_min_queue_size,
+        add_added_tracks_to_source: session.add_added_tracks_to_source,
         current_track_uri: session.current_track_uri,
         is_host,
     }

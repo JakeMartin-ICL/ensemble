@@ -4,15 +4,19 @@ import QueueList from '../../components/QueueList'
 import { supabase } from '../../lib/supabase'
 import {
   type PartyMode,
+  type PartyPlaylistSearchResult,
   type PartyQueueItem,
   type PartyQueueState,
   type PartySession,
+  type PartySourceQueueState,
+  addPartyQueuePlaylist,
   addPartyQueueTrack,
   endPartySession,
   getPartyPlayback,
   getPartyLibraryTracks,
   getPartyQueue,
   getPartySession,
+  getPartySourceQueue,
   getPartyTrack,
   pausePartySession,
   removePartyQueueTrack,
@@ -22,6 +26,7 @@ import {
   searchPartyTracks,
   skipPartySession,
   updatePartyMode,
+  updatePartySettings,
 } from '../../lib/party'
 import type { PlaybackState, TrackDetails, TrackSearchResult } from '../../lib/weave'
 import styles from '../../styles/Mode.module.css'
@@ -36,15 +41,20 @@ interface ObservedPlayback extends PlaybackState {
 export default function PartySessionPage() {
   const [session, setSession] = useState<PartySession | null>(null)
   const [queue, setQueue] = useState<PartyQueueState>({ items: [] })
+  const [sourceQueue, setSourceQueue] = useState<PartySourceQueueState | null>(null)
+  const [sourceQueueOpen, setSourceQueueOpen] = useState(false)
   const [track, setTrack] = useState<TrackDetails | null>(null)
   const [playback, setPlayback] = useState<ObservedPlayback | null>(null)
   const [libraryTracks, setLibraryTracks] = useState<TrackSearchResult[]>([])
+  const [libraryPlaylists, setLibraryPlaylists] = useState<PartyPlaylistSearchResult[]>([])
   const [libraryLoading, setLibraryLoading] = useState(false)
   const [now, setNow] = useState(() => Date.now())
   const [copiedCode, setCopiedCode] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settingsVisible, setSettingsVisible] = useState(false)
   const [savingMode, setSavingMode] = useState<PartyMode | null>(null)
+  const [savingGuestPlaylists, setSavingGuestPlaylists] = useState(false)
+  const [savingSourceSettings, setSavingSourceSettings] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const pendingRemovedIdsRef = useRef<Set<string>>(new Set())
   const settingsButtonRef = useRef<HTMLButtonElement | null>(null)
@@ -74,7 +84,10 @@ export default function PartySessionPage() {
 
     setLibraryLoading(true)
     void getPartyLibraryTracks()
-      .then((response) => { setLibraryTracks(response.results) })
+      .then((response) => {
+        setLibraryTracks(response.results)
+        setLibraryPlaylists(response.playlists)
+      })
       .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
       .finally(() => { setLibraryLoading(false) })
   }, [session?.id])
@@ -89,10 +102,15 @@ export default function PartySessionPage() {
       void getPartyQueue(session.id)
         .then((q) => { setQueue(filterPendingRemoved(q, pendingRemovedIdsRef.current)) })
         .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
+      if (sourceQueueOpen) {
+        void getPartySourceQueue(session.id)
+          .then(setSourceQueue)
+          .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
+      }
     }, 3000)
 
     return () => { window.clearInterval(interval) }
-  }, [session?.id])
+  }, [session?.id, sourceQueueOpen])
 
   useEffect(() => {
     if (!session?.id) return
@@ -108,7 +126,19 @@ export default function PartySessionPage() {
           filter: `session_id=eq.${session.id}`,
         },
         () => {
-          void getPartyQueue(session.id).then((q) => { setQueue(filterPendingRemoved(q, pendingRemovedIdsRef.current)) })
+          refreshQueues(session.id)
+        },
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'party_source_queue_items',
+          filter: `session_id=eq.${session.id}`,
+        },
+        () => {
+          if (sourceQueueOpen) void getPartySourceQueue(session.id).then(setSourceQueue)
         },
       )
       .on(
@@ -126,7 +156,7 @@ export default function PartySessionPage() {
       .subscribe()
 
     return () => { void supabase.removeChannel(channel) }
-  }, [session?.id])
+  }, [session?.id, sourceQueueOpen])
 
   useEffect(() => {
     const interval = window.setInterval(() => { setNow(Date.now()) }, 250)
@@ -183,10 +213,31 @@ export default function PartySessionPage() {
       .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
   }
 
+  function refreshSourceQueue(id = session?.id) {
+    if (!id || !sourceQueueOpen) return
+    void getPartySourceQueue(id)
+      .then(setSourceQueue)
+      .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
+  }
+
+  function refreshQueues(id = session?.id) {
+    refreshQueue(id)
+    refreshSourceQueue(id)
+  }
+
   function handleAdd(item: TrackSearchResult) {
     if (!session) return Promise.resolve()
     return addPartyQueueTrack(session.id, item)
       .then((q) => { setQueue(filterPendingRemoved(q, pendingRemovedIdsRef.current)) })
+      .then(() => { refreshSourceQueue(session.id) })
+      .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
+  }
+
+  function handleAddPlaylist(playlist: PartyPlaylistSearchResult) {
+    if (!session || !canAddPlaylists(session)) return Promise.resolve()
+    return addPartyQueuePlaylist(session.id, playlist.id)
+      .then((q) => { setQueue(filterPendingRemoved(q, pendingRemovedIdsRef.current)) })
+      .then(() => { refreshSourceQueue(session.id) })
       .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
   }
 
@@ -207,6 +258,7 @@ export default function PartySessionPage() {
       .then((q) => {
         pendingRemovedIdsRef.current.delete(item.id)
         setQueue(filterPendingRemoved(q, pendingRemovedIdsRef.current))
+        refreshSourceQueue(session.id)
       })
       .catch((e: unknown) => {
         pendingRemovedIdsRef.current.delete(item.id)
@@ -220,7 +272,7 @@ export default function PartySessionPage() {
     void skipPartySession(session.id)
       .then((s) => {
         setSession(s)
-        refreshQueue(s.id)
+        refreshQueues(s.id)
         return getPartyPlayback(s.id)
       })
       .then((p) => { setPlayback(p ? { ...p, observed_at: Date.now() } : null) })
@@ -260,6 +312,42 @@ export default function PartySessionPage() {
       .then((s) => { setSession(applyDevGuestOverride(s)) })
       .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
       .finally(() => { setSavingMode(null) })
+  }
+
+  function handleGuestPlaylistAddsChange(allowGuestPlaylistAdds: boolean) {
+    if (!session?.is_host || savingGuestPlaylists) return
+    setSavingGuestPlaylists(true)
+    void updatePartySettings(session.id, { allow_guest_playlist_adds: allowGuestPlaylistAdds })
+      .then((s) => { setSession(applyDevGuestOverride(s)) })
+      .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
+      .finally(() => { setSavingGuestPlaylists(false) })
+  }
+
+  function handleSourceSettingsChange(sourceMinQueueSize: number, addAddedTracksToSource: boolean) {
+    if (!session?.is_host || savingSourceSettings) return
+    setSavingSourceSettings(true)
+    void updatePartySettings(session.id, {
+      source_min_queue_size: sourceMinQueueSize,
+      add_added_tracks_to_source: addAddedTracksToSource,
+    })
+      .then((s) => {
+        setSession(applyDevGuestOverride(s))
+        refreshQueue(s.id)
+        refreshSourceQueue(s.id)
+      })
+      .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
+      .finally(() => { setSavingSourceSettings(false) })
+  }
+
+  function handleToggleSourceQueue() {
+    if (!session?.is_host) return
+    const nextOpen = !sourceQueueOpen
+    setSourceQueueOpen(nextOpen)
+    if (nextOpen) {
+      void getPartySourceQueue(session.id)
+        .then(setSourceQueue)
+        .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
+    }
   }
 
   function toggleSettings() {
@@ -347,9 +435,16 @@ export default function PartySessionPage() {
               {settingsVisible && (
                 <PartySettingsPanel
                   mode={session.mode}
+                  allowGuestPlaylistAdds={session.allow_guest_playlist_adds}
+                  sourceMinQueueSize={session.source_min_queue_size}
+                  addAddedTracksToSource={session.add_added_tracks_to_source}
                   closing={!settingsOpen}
                   savingMode={savingMode}
+                  savingGuestPlaylists={savingGuestPlaylists}
+                  savingSourceSettings={savingSourceSettings}
                   onModeChange={handleModeChange}
+                  onGuestPlaylistAddsChange={handleGuestPlaylistAddsChange}
+                  onSourceSettingsChange={handleSourceSettingsChange}
                 />
               )}
             </div>
@@ -393,15 +488,27 @@ export default function PartySessionPage() {
         sessionId={session.id}
         queue={queue}
         canEditQueue={canEditQueue(session)}
+        canAddPlaylists={canAddPlaylists(session)}
         libraryTracks={libraryTracks}
+        libraryPlaylists={libraryPlaylists}
         libraryLoading={libraryLoading}
         onAddTrack={handleAdd}
+        onAddPlaylist={handleAddPlaylist}
         onReorder={handleReorder}
         onRemove={handleRemove}
       />
 
+      {sourceQueueOpen && sourceQueue && (
+        <SourceQueuePanel sourceQueue={sourceQueue} onHide={handleToggleSourceQueue} />
+      )}
+
       {session.is_host ? (
-        <button className={styles.endBtn} onClick={handleEnd}>End session</button>
+        <div className={styles.actions}>
+          <button className={styles.pillGhostBtn} onClick={handleToggleSourceQueue}>
+            {sourceQueueOpen ? 'Hide source queue' : 'View source queue'}
+          </button>
+          <button className={styles.endBtn} onClick={handleEnd}>End session</button>
+        </div>
       ) : (
         <button
           className={styles.endBtn}
@@ -429,27 +536,35 @@ function PartyQueuePanel({
   sessionId,
   queue,
   canEditQueue,
+  canAddPlaylists,
   libraryTracks,
+  libraryPlaylists,
   libraryLoading,
   onAddTrack,
+  onAddPlaylist,
   onReorder,
   onRemove,
 }: {
   sessionId: string
   queue: PartyQueueState
   canEditQueue: boolean
+  canAddPlaylists: boolean
   libraryTracks: TrackSearchResult[]
+  libraryPlaylists: PartyPlaylistSearchResult[]
   libraryLoading: boolean
   onAddTrack: (item: TrackSearchResult) => Promise<void>
+  onAddPlaylist: (playlist: PartyPlaylistSearchResult) => Promise<void>
   onReorder: (item: PartyQueueItem, toPosition: number) => void
   onRemove: (item: PartyQueueItem) => void
 }) {
   const [query, setQuery] = useState('')
   const [localResults, setLocalResults] = useState<TrackSearchResult[]>([])
+  const [playlistResults, setPlaylistResults] = useState<PartyPlaylistSearchResult[]>([])
   const [spotifyResults, setSpotifyResults] = useState<TrackSearchResult[] | null>(null)
   const [searchingLocal, setSearchingLocal] = useState(false)
   const [searchingSpotify, setSearchingSpotify] = useState(false)
   const [addingUri, setAddingUri] = useState<string | null>(null)
+  const [addingPlaylistId, setAddingPlaylistId] = useState<string | null>(null)
   const searchResultsRef = useRef<HTMLDivElement | null>(null)
   const [searchResultsHeight, setSearchResultsHeight] = useState(0)
 
@@ -457,6 +572,7 @@ function PartyQueuePanel({
     const term = query.trim()
     if (term.length < 2) {
       setLocalResults([])
+      setPlaylistResults([])
       setSpotifyResults(null)
       setSearchingLocal(false)
       return
@@ -466,11 +582,12 @@ function PartyQueuePanel({
     setSpotifyResults(null)
     const timer = window.setTimeout(() => {
       setLocalResults(searchLoadedLibrary(libraryTracks, term, 20))
+      setPlaylistResults(canAddPlaylists ? searchLoadedPlaylists(libraryPlaylists, term, 10) : [])
       setSearchingLocal(false)
     }, 180)
 
     return () => { window.clearTimeout(timer) }
-  }, [libraryTracks, query])
+  }, [canAddPlaylists, libraryPlaylists, libraryTracks, query])
 
   function handleSearchSpotify() {
     const term = query.trim()
@@ -488,6 +605,18 @@ function PartyQueuePanel({
       setAddingUri(null)
       setQuery('')
       setLocalResults([])
+      setPlaylistResults([])
+      setSpotifyResults(null)
+    })
+  }
+
+  function handleAddPlaylist(playlist: PartyPlaylistSearchResult) {
+    setAddingPlaylistId(playlist.id)
+    void onAddPlaylist(playlist).finally(() => {
+      setAddingPlaylistId(null)
+      setQuery('')
+      setLocalResults([])
+      setPlaylistResults([])
       setSpotifyResults(null)
     })
   }
@@ -549,6 +678,7 @@ function PartyQueuePanel({
   }, [
     libraryLoading,
     localDedupedResults.length,
+    playlistResults.length,
     query,
     searchOpen,
     searchingLocal,
@@ -578,7 +708,7 @@ function PartyQueuePanel({
             {searchOpen && (
               <>
                 {(libraryLoading || searchingLocal) && localDedupedResults.length === 0 && <p className={styles.queueEmpty}>Searching your playlists...</p>}
-                {!libraryLoading && !searchingLocal && localDedupedResults.length === 0 && <p className={styles.queueEmpty}>No matches</p>}
+                {!libraryLoading && !searchingLocal && localDedupedResults.length === 0 && playlistResults.length === 0 && <p className={styles.queueEmpty}>No matches</p>}
                 {!libraryLoading && localDedupedResults.map(({ result, playlists }) => (
                   <div key={result.uri} className={styles.queueSearchResult}>
                     {result.album_art_url
@@ -603,6 +733,38 @@ function PartyQueuePanel({
                     </button>
                   </div>
                 ))}
+
+                {!libraryLoading && canAddPlaylists && playlistResults.length > 0 && (
+                  <>
+                    <div className={styles.spotifyDivider}>
+                      <PlaylistIcon />
+                      Playlists
+                    </div>
+                    {playlistResults.map((playlist) => (
+                      <div key={playlist.id} className={styles.queueSearchResult}>
+                        {playlist.image_url
+                          ? <img className={styles.queueSearchArt} src={playlist.image_url} alt="" />
+                          : <div className={styles.queueSearchArt}><PlaylistIcon /></div>
+                        }
+                        <span className={styles.queueTrackText}>
+                          <span className={styles.queueTrackName}>{playlist.name}</span>
+                          <span className={styles.queueArtistName}>{playlist.track_count.toString()} tracks</span>
+                        </span>
+                        <button
+                          className={styles.queueSearchAddBtn}
+                          style={{ color: '#1db954', borderColor: 'rgba(29, 185, 84, 0.45)' }}
+                          onClick={() => { handleAddPlaylist(playlist) }}
+                          disabled={addingPlaylistId === playlist.id}
+                          type="button"
+                          aria-label="Add playlist"
+                          title="Add playlist"
+                        >
+                          <PlusIcon />
+                        </button>
+                      </div>
+                    ))}
+                  </>
+                )}
 
                 {spotifyResults === null && (
                   <button
@@ -685,14 +847,28 @@ function PartyQueuePanel({
 
 function PartySettingsPanel({
   mode,
+  allowGuestPlaylistAdds,
+  sourceMinQueueSize,
+  addAddedTracksToSource,
   closing,
   savingMode,
+  savingGuestPlaylists,
+  savingSourceSettings,
   onModeChange,
+  onGuestPlaylistAddsChange,
+  onSourceSettingsChange,
 }: {
   mode: PartyMode
+  allowGuestPlaylistAdds: boolean
+  sourceMinQueueSize: number
+  addAddedTracksToSource: boolean
   closing: boolean
   savingMode: PartyMode | null
+  savingGuestPlaylists: boolean
+  savingSourceSettings: boolean
   onModeChange: (mode: PartyMode) => void
+  onGuestPlaylistAddsChange: (allowGuestPlaylistAdds: boolean) => void
+  onSourceSettingsChange: (sourceMinQueueSize: number, addAddedTracksToSource: boolean) => void
 }) {
   return (
     <div className={`${styles.partySettingsPanel}${closing ? ` ${styles.partySettingsPanelClosing}` : ''}`}>
@@ -722,7 +898,92 @@ function PartySettingsPanel({
           <span className={styles.partyModeMeta}>Everyone can add, reorder, and remove.</span>
         </span>
       </button>
+      <button
+        className={`${styles.partyModeOption} ${styles.partySettingOption}${allowGuestPlaylistAdds ? ` ${styles.partyModeOptionActive}` : ''}`}
+        onClick={() => { onGuestPlaylistAddsChange(!allowGuestPlaylistAdds) }}
+        disabled={savingGuestPlaylists}
+        type="button"
+        aria-pressed={allowGuestPlaylistAdds}
+      >
+        <span className={styles.partyModeIcon}><PlaylistIcon /></span>
+        <span>
+          <span className={styles.partyModeTitle}>Guest playlists</span>
+          <span className={styles.partyModeMeta}>Guests can add full playlists from search.</span>
+        </span>
+      </button>
+      <label className={`${styles.partyModeOption} ${styles.partySettingOption}`}>
+        <span className={styles.partyModeIcon}><QueueEditIcon /></span>
+        <span>
+          <span className={styles.partyModeTitle}>Minimum queue</span>
+          <input
+            className={styles.partySettingInput}
+            type="number"
+            min="0"
+            max="25"
+            value={sourceMinQueueSize}
+            onChange={(e) => {
+              onSourceSettingsChange(
+                clampInt(e.target.value, 0, 25),
+                addAddedTracksToSource,
+              )
+            }}
+            disabled={savingSourceSettings}
+            aria-label="Minimum queue size"
+          />
+        </span>
+      </label>
+      <button
+        className={`${styles.partyModeOption} ${styles.partySettingOption}${addAddedTracksToSource ? ` ${styles.partyModeOptionActive}` : ''}`}
+        onClick={() => { onSourceSettingsChange(sourceMinQueueSize, !addAddedTracksToSource) }}
+        disabled={savingSourceSettings}
+        type="button"
+        aria-pressed={addAddedTracksToSource}
+      >
+        <span className={styles.partyModeIcon}><RestartIcon /></span>
+        <span>
+          <span className={styles.partyModeTitle}>Recycle adds</span>
+          <span className={styles.partyModeMeta}>Added songs return after the source cycle.</span>
+        </span>
+      </button>
     </div>
+  )
+}
+
+function SourceQueuePanel({
+  sourceQueue,
+  onHide,
+}: {
+  sourceQueue: PartySourceQueueState
+  onHide: () => void
+}) {
+  return (
+    <section className={styles.queuePanel}>
+      <div className={styles.sourceQueueHeader}>
+        <button className={styles.queueTab} type="button">Source queue</button>
+        <button className={styles.pillGhostBtn} onClick={onHide} type="button">
+          Hide
+        </button>
+      </div>
+      {sourceQueue.items.length === 0 ? (
+        <p className={styles.queueEmpty}>No source songs</p>
+      ) : (
+        <div className={styles.sourceQueueList}>
+          {sourceQueue.items.map((item) => (
+            <div key={item.id} className={styles.sourceQueueItem}>
+              {item.album_art_url
+                ? <img className={styles.queueSearchArt} src={item.album_art_url} alt="" />
+                : <div className={styles.queueSearchArt} />
+              }
+              <span className={styles.queueTrackText}>
+                <span className={styles.queueTrackName}>{item.name ?? item.uri}</span>
+                {item.artist && <span className={styles.queueArtistName}>{item.artist}</span>}
+              </span>
+              {item.deferred && <span className={styles.turnBadge}>Later</span>}
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
   )
 }
 
@@ -798,6 +1059,14 @@ function SpotifyIcon() {
   )
 }
 
+function PlaylistIcon() {
+  return (
+    <IconSvg>
+      <path d="M4 5h12v2H4V5Zm0 4h12v2H4V9Zm0 4h8v2H4v-2Zm11.5.5V11h2v2.5H20v2h-2.5V18h-2v-2.5H13v-2h2.5Z" />
+    </IconSvg>
+  )
+}
+
 function applyMove(queue: PartyQueueState, itemId: string, toPosition: number): PartyQueueState {
   const items = [...queue.items]
   const fromPosition = items.findIndex((item) => item.id === itemId)
@@ -843,6 +1112,23 @@ function searchLoadedLibrary(
   return results
 }
 
+function searchLoadedPlaylists(
+  playlists: PartyPlaylistSearchResult[],
+  term: string,
+  limit: number,
+): PartyPlaylistSearchResult[] {
+  const needle = term.toLowerCase()
+  const results: PartyPlaylistSearchResult[] = []
+
+  for (const playlist of playlists) {
+    if (!playlist.name.toLowerCase().includes(needle)) continue
+    results.push(playlist)
+    if (results.length >= limit) break
+  }
+
+  return results
+}
+
 function currentProgress(playback: ObservedPlayback | null, now: number): number {
   if (!playback) return 0
   if (!playback.is_playing) return playback.progress_ms
@@ -863,6 +1149,16 @@ function canEditQueue(session: PartySession): boolean {
   return session.is_host || session.mode === 'shared_queue'
 }
 
+function canAddPlaylists(session: PartySession): boolean {
+  return session.is_host || session.allow_guest_playlist_adds
+}
+
 function modeLabel(mode: PartyMode): string {
   return mode === 'shared_queue' ? 'Shared queue' : 'Add only'
+}
+
+function clampInt(value: string, min: number, max: number): number {
+  const parsed = Number.parseInt(value, 10)
+  if (Number.isNaN(parsed)) return min
+  return Math.max(min, Math.min(max, parsed))
 }

@@ -20,6 +20,9 @@ pub struct PartySession {
     pub host_user_id: Uuid,
     pub room_code: String,
     pub mode: String,
+    pub allow_guest_playlist_adds: bool,
+    pub source_min_queue_size: i32,
+    pub add_added_tracks_to_source: bool,
     pub current_track_uri: Option<String>,
     pub queued_track_uri: Option<String>,
     pub is_active: bool,
@@ -37,12 +40,31 @@ pub struct PartyQueueItem {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct PartySourceQueueItem {
+    pub id: Uuid,
+    pub session_id: Uuid,
+    pub position: i32,
+    pub track: Json<PartyTrack>,
+    pub added_by_user_id: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+}
+
 pub struct NewPartySession {
     pub host_user_id: Uuid,
     pub room_code: String,
+    pub source_min_queue_size: i32,
+    pub add_added_tracks_to_source: bool,
 }
 
 pub struct NewPartyQueueItem {
+    pub session_id: Uuid,
+    pub position: i32,
+    pub track: PartyTrack,
+    pub added_by_user_id: Option<Uuid>,
+}
+
+pub struct NewPartySourceQueueItem {
     pub session_id: Uuid,
     pub position: i32,
     pub track: PartyTrack,
@@ -79,14 +101,19 @@ impl std::str::FromStr for PartyMode {
 pub async fn create_session(pool: &PgPool, s: &NewPartySession) -> anyhow::Result<PartySession> {
     let session = sqlx::query_as::<_, PartySession>(
         r#"
-        INSERT INTO public.party_sessions (host_user_id, room_code)
-        VALUES ($1, $2)
-        RETURNING id, host_user_id, room_code, mode, current_track_uri, queued_track_uri,
-                  is_active, created_at, updated_at
+        INSERT INTO public.party_sessions (
+            host_user_id, room_code, source_min_queue_size, add_added_tracks_to_source
+        )
+        VALUES ($1, $2, $3, $4)
+        RETURNING id, host_user_id, room_code, mode, allow_guest_playlist_adds,
+                  source_min_queue_size, add_added_tracks_to_source,
+                  current_track_uri, queued_track_uri, is_active, created_at, updated_at
         "#,
     )
     .bind(s.host_user_id)
     .bind(&s.room_code)
+    .bind(s.source_min_queue_size)
+    .bind(s.add_added_tracks_to_source)
     .fetch_one(pool)
     .await
     .context("inserting party session")?;
@@ -99,8 +126,9 @@ pub async fn get_active_session(
 ) -> anyhow::Result<Option<PartySession>> {
     let session = sqlx::query_as::<_, PartySession>(
         r#"
-        SELECT id, host_user_id, room_code, mode, current_track_uri, queued_track_uri,
-               is_active, created_at, updated_at
+        SELECT id, host_user_id, room_code, mode, allow_guest_playlist_adds,
+               source_min_queue_size, add_added_tracks_to_source,
+               current_track_uri, queued_track_uri, is_active, created_at, updated_at
         FROM public.party_sessions
         WHERE host_user_id = $1 AND is_active = true
         ORDER BY created_at DESC
@@ -117,8 +145,9 @@ pub async fn get_active_session(
 pub async fn get_session(pool: &PgPool, session_id: Uuid) -> anyhow::Result<Option<PartySession>> {
     let session = sqlx::query_as::<_, PartySession>(
         r#"
-        SELECT id, host_user_id, room_code, mode, current_track_uri, queued_track_uri,
-               is_active, created_at, updated_at
+        SELECT id, host_user_id, room_code, mode, allow_guest_playlist_adds,
+               source_min_queue_size, add_added_tracks_to_source,
+               current_track_uri, queued_track_uri, is_active, created_at, updated_at
         FROM public.party_sessions
         WHERE id = $1
         "#,
@@ -136,8 +165,9 @@ pub async fn get_session_by_room_code(
 ) -> anyhow::Result<Option<PartySession>> {
     let session = sqlx::query_as::<_, PartySession>(
         r#"
-        SELECT id, host_user_id, room_code, mode, current_track_uri, queued_track_uri,
-               is_active, created_at, updated_at
+        SELECT id, host_user_id, room_code, mode, allow_guest_playlist_adds,
+               source_min_queue_size, add_added_tracks_to_source,
+               current_track_uri, queued_track_uri, is_active, created_at, updated_at
         FROM public.party_sessions
         WHERE room_code = $1 AND is_active = true
         "#,
@@ -181,8 +211,9 @@ pub async fn set_mode(
         UPDATE public.party_sessions
         SET mode = $1, updated_at = now()
         WHERE id = $2
-        RETURNING id, host_user_id, room_code, mode, current_track_uri, queued_track_uri,
-                  is_active, created_at, updated_at
+        RETURNING id, host_user_id, room_code, mode, allow_guest_playlist_adds,
+                  source_min_queue_size, add_added_tracks_to_source,
+                  current_track_uri, queued_track_uri, is_active, created_at, updated_at
         "#,
     )
     .bind(mode.as_str())
@@ -190,6 +221,54 @@ pub async fn set_mode(
     .fetch_one(pool)
     .await
     .context("updating party session mode")?;
+    Ok(session)
+}
+
+pub async fn set_allow_guest_playlist_adds(
+    pool: &PgPool,
+    session_id: Uuid,
+    allow_guest_playlist_adds: bool,
+) -> anyhow::Result<PartySession> {
+    let session = sqlx::query_as::<_, PartySession>(
+        r#"
+        UPDATE public.party_sessions
+        SET allow_guest_playlist_adds = $1, updated_at = now()
+        WHERE id = $2
+        RETURNING id, host_user_id, room_code, mode, allow_guest_playlist_adds,
+                  source_min_queue_size, add_added_tracks_to_source,
+                  current_track_uri, queued_track_uri, is_active, created_at, updated_at
+        "#,
+    )
+    .bind(allow_guest_playlist_adds)
+    .bind(session_id)
+    .fetch_one(pool)
+    .await
+    .context("updating party guest playlist setting")?;
+    Ok(session)
+}
+
+pub async fn set_source_settings(
+    pool: &PgPool,
+    session_id: Uuid,
+    source_min_queue_size: i32,
+    add_added_tracks_to_source: bool,
+) -> anyhow::Result<PartySession> {
+    let session = sqlx::query_as::<_, PartySession>(
+        r#"
+        UPDATE public.party_sessions
+        SET source_min_queue_size = $1, add_added_tracks_to_source = $2, updated_at = now()
+        WHERE id = $3
+        RETURNING id, host_user_id, room_code, mode, allow_guest_playlist_adds,
+                  source_min_queue_size, add_added_tracks_to_source,
+                  current_track_uri, queued_track_uri, is_active, created_at, updated_at
+        "#,
+    )
+    .bind(source_min_queue_size)
+    .bind(add_added_tracks_to_source)
+    .bind(session_id)
+    .fetch_one(pool)
+    .await
+    .context("updating party source settings")?;
     Ok(session)
 }
 
@@ -281,6 +360,30 @@ pub async fn next_position(pool: &PgPool, session_id: Uuid) -> anyhow::Result<i3
     Ok(position)
 }
 
+async fn source_append_position(pool: &PgPool, session_id: Uuid) -> anyhow::Result<i32> {
+    let position = sqlx::query_scalar::<_, Option<i32>>(
+        "SELECT max(position) + 1 FROM public.party_source_queue_items WHERE session_id = $1 AND position >= 0",
+    )
+    .bind(session_id)
+    .fetch_one(pool)
+    .await
+    .context("fetching next party source position")?
+    .unwrap_or(0);
+    Ok(position)
+}
+
+async fn source_deferred_position(pool: &PgPool, session_id: Uuid) -> anyhow::Result<i32> {
+    let position = sqlx::query_scalar::<_, Option<i32>>(
+        "SELECT min(position) - 1 FROM public.party_source_queue_items WHERE session_id = $1",
+    )
+    .bind(session_id)
+    .fetch_one(pool)
+    .await
+    .context("fetching deferred party source position")?
+    .unwrap_or(-1);
+    Ok(position.min(-1))
+}
+
 pub async fn add_queue_item(
     pool: &PgPool,
     item: &NewPartyQueueItem,
@@ -300,6 +403,171 @@ pub async fn add_queue_item(
     .await
     .context("adding party queue item")?;
     Ok(item)
+}
+
+pub async fn source_queue_items(
+    pool: &PgPool,
+    session_id: Uuid,
+) -> anyhow::Result<Vec<PartySourceQueueItem>> {
+    let items = sqlx::query_as::<_, PartySourceQueueItem>(
+        r#"
+        SELECT id, session_id, position, track, added_by_user_id, created_at
+        FROM public.party_source_queue_items
+        WHERE session_id = $1
+        ORDER BY (position < 0) ASC, position ASC, created_at ASC
+        "#,
+    )
+    .bind(session_id)
+    .fetch_all(pool)
+    .await
+    .context("fetching party source queue items")?;
+    Ok(items)
+}
+
+pub async fn add_source_queue_items(
+    pool: &PgPool,
+    session_id: Uuid,
+    start_position: i32,
+    tracks: &[PartyTrack],
+    added_by_user_id: Uuid,
+) -> anyhow::Result<()> {
+    let positions = tracks
+        .iter()
+        .enumerate()
+        .map(|(offset, _)| {
+            let offset = i32::try_from(offset).context("source queue position overflow")?;
+            start_position
+                .checked_add(offset)
+                .context("source queue position overflow")
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let track_json = tracks
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()
+        .context("serializing party source queue tracks")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO public.party_source_queue_items (session_id, position, track, added_by_user_id)
+        SELECT $1, mapped.position, mapped.track, $4
+        FROM unnest($2::integer[], $3::jsonb[]) AS mapped(position, track)
+        ON CONFLICT (session_id, (track->>'uri'))
+        DO UPDATE SET
+          position = EXCLUDED.position,
+          track = EXCLUDED.track,
+          added_by_user_id = EXCLUDED.added_by_user_id
+        "#,
+    )
+    .bind(session_id)
+    .bind(&positions)
+    .bind(&track_json)
+    .bind(added_by_user_id)
+    .execute(pool)
+    .await
+    .context("adding party source queue items")?;
+
+    sqlx::query("UPDATE public.party_sessions SET updated_at = now() WHERE id = $1")
+        .bind(session_id)
+        .execute(pool)
+        .await
+        .context("touching party session after source queue add")?;
+
+    Ok(())
+}
+
+pub async fn append_source_queue_items(
+    pool: &PgPool,
+    session_id: Uuid,
+    tracks: &[PartyTrack],
+    added_by_user_id: Uuid,
+) -> anyhow::Result<()> {
+    let position = source_append_position(pool, session_id).await?;
+    add_source_queue_items(pool, session_id, position, tracks, added_by_user_id).await
+}
+
+pub async fn defer_source_queue_track(
+    pool: &PgPool,
+    session_id: Uuid,
+    track: &PartyTrack,
+    added_by_user_id: Uuid,
+) -> anyhow::Result<()> {
+    let position = source_deferred_position(pool, session_id).await?;
+    let track_json = serde_json::to_value(track).context("serializing deferred source track")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO public.party_source_queue_items (session_id, position, track, added_by_user_id)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (session_id, (track->>'uri'))
+        DO UPDATE SET
+          position = EXCLUDED.position,
+          track = EXCLUDED.track,
+          added_by_user_id = EXCLUDED.added_by_user_id
+        "#,
+    )
+    .bind(session_id)
+    .bind(position)
+    .bind(track_json)
+    .bind(added_by_user_id)
+    .execute(pool)
+    .await
+    .context("deferring party source queue track")?;
+
+    sqlx::query("UPDATE public.party_sessions SET updated_at = now() WHERE id = $1")
+        .bind(session_id)
+        .execute(pool)
+        .await
+        .context("touching party session after source queue defer")?;
+
+    Ok(())
+}
+
+pub async fn add_queue_items(
+    pool: &PgPool,
+    session_id: Uuid,
+    start_position: i32,
+    tracks: &[PartyTrack],
+    added_by_user_id: Uuid,
+) -> anyhow::Result<()> {
+    let positions = tracks
+        .iter()
+        .enumerate()
+        .map(|(offset, _)| {
+            let offset = i32::try_from(offset).context("queue position overflow")?;
+            start_position
+                .checked_add(offset)
+                .context("queue position overflow")
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let track_json = tracks
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()
+        .context("serializing party queue tracks")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO public.party_queue_items (session_id, position, track, added_by_user_id)
+        SELECT $1, mapped.position, mapped.track, $4
+        FROM unnest($2::integer[], $3::jsonb[]) AS mapped(position, track)
+        "#,
+    )
+    .bind(session_id)
+    .bind(&positions)
+    .bind(&track_json)
+    .bind(added_by_user_id)
+    .execute(pool)
+    .await
+    .context("adding party queue items")?;
+
+    sqlx::query("UPDATE public.party_sessions SET updated_at = now() WHERE id = $1")
+        .bind(session_id)
+        .execute(pool)
+        .await
+        .context("touching party session after playlist add")?;
+
+    Ok(())
 }
 
 pub async fn update_queue_positions(
@@ -406,6 +674,137 @@ pub async fn remove_first_queue_item_by_uri(
     compact_queue_positions(pool, session_id).await?;
 
     Ok(item)
+}
+
+pub async fn refill_queue_from_source(pool: &PgPool, session_id: Uuid) -> anyhow::Result<()> {
+    let min_queue_size = sqlx::query_scalar::<_, i32>(
+        "SELECT source_min_queue_size FROM public.party_sessions WHERE id = $1",
+    )
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await
+    .context("fetching party source minimum queue size")?
+    .unwrap_or(0);
+
+    if min_queue_size <= 0 {
+        return Ok(());
+    }
+
+    let mut visible_count = queue_len(pool, session_id).await?;
+    while visible_count < min_queue_size {
+        let Some(source_item) = pop_next_source_queue_item(pool, session_id).await? else {
+            break;
+        };
+
+        let position = next_position(pool, session_id).await?;
+        add_queue_item(
+            pool,
+            &NewPartyQueueItem {
+                session_id,
+                position,
+                track: source_item.track.0,
+                added_by_user_id: source_item.added_by_user_id,
+            },
+        )
+        .await?;
+        visible_count += 1;
+    }
+
+    Ok(())
+}
+
+async fn queue_len(pool: &PgPool, session_id: Uuid) -> anyhow::Result<i32> {
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM public.party_queue_items WHERE session_id = $1",
+    )
+    .bind(session_id)
+    .fetch_one(pool)
+    .await
+    .context("counting party queue items")?;
+    i32::try_from(count).context("party queue count overflow")
+}
+
+async fn source_len(pool: &PgPool, session_id: Uuid) -> anyhow::Result<i64> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM public.party_source_queue_items WHERE session_id = $1",
+    )
+    .bind(session_id)
+    .fetch_one(pool)
+    .await
+    .context("counting party source queue items")
+}
+
+async fn pop_next_source_queue_item(
+    pool: &PgPool,
+    session_id: Uuid,
+) -> anyhow::Result<Option<PartySourceQueueItem>> {
+    let item = take_next_source_queue_item(pool, session_id).await?;
+    if item.is_some() || source_len(pool, session_id).await? == 0 {
+        return Ok(item);
+    }
+
+    reshuffle_source_queue(pool, session_id).await?;
+    take_next_source_queue_item(pool, session_id).await
+}
+
+async fn take_next_source_queue_item(
+    pool: &PgPool,
+    session_id: Uuid,
+) -> anyhow::Result<Option<PartySourceQueueItem>> {
+    let item = sqlx::query_as::<_, PartySourceQueueItem>(
+        r#"
+        WITH next_item AS (
+            SELECT id
+            FROM public.party_source_queue_items s
+            WHERE s.session_id = $1
+              AND s.position >= 0
+              AND NOT EXISTS (
+                SELECT 1
+                FROM public.party_queue_items q
+                WHERE q.session_id = $1
+                  AND q.track->>'uri' = s.track->>'uri'
+              )
+            ORDER BY position ASC, created_at ASC
+            LIMIT 1
+        ),
+        deferred AS (
+            SELECT least(coalesce(min(position) - 1, -1), -1) AS position
+            FROM public.party_source_queue_items
+            WHERE session_id = $1
+        )
+        UPDATE public.party_source_queue_items s
+        SET position = deferred.position
+        FROM next_item, deferred
+        WHERE s.id = next_item.id
+        RETURNING s.id, s.session_id, s.position, s.track, s.added_by_user_id, s.created_at
+        "#,
+    )
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await
+    .context("taking next party source queue item")?;
+    Ok(item)
+}
+
+async fn reshuffle_source_queue(pool: &PgPool, session_id: Uuid) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        WITH ranked AS (
+            SELECT id, row_number() OVER (ORDER BY random()) - 1 AS new_position
+            FROM public.party_source_queue_items
+            WHERE session_id = $1
+        )
+        UPDATE public.party_source_queue_items s
+        SET position = ranked.new_position
+        FROM ranked
+        WHERE s.id = ranked.id
+        "#,
+    )
+    .bind(session_id)
+    .execute(pool)
+    .await
+    .context("reshuffling party source queue")?;
+    Ok(())
 }
 
 async fn compact_queue_positions(pool: &PgPool, session_id: Uuid) -> anyhow::Result<()> {

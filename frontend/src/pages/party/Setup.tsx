@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
+  type PartyPlaylistSearchResult,
   type PartySession,
   createPartySession,
   endPartySession,
   getActivePartySession,
+  getPartyLibraryTracks,
   joinPartySession,
 } from '../../lib/party'
 import styles from '../../styles/Mode.module.css'
@@ -16,7 +18,11 @@ export default function PartyHome() {
   const [active, setActive] = useState<PartySession | null | undefined>(undefined)
   const [joinCode, setJoinCode] = useState('')
   const [joinAsGuest, setJoinAsGuest] = useState(false)
+  const [playlists, setPlaylists] = useState<PartyPlaylistSearchResult[]>([])
+  const [sourcePlaylistId, setSourcePlaylistId] = useState('')
+  const [minimumQueueSize, setMinimumQueueSize] = useState(3)
   const [loading, setLoading] = useState(false)
+  const [libraryLoading, setLibraryLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const navigate = useNavigate()
 
@@ -27,6 +33,14 @@ export default function PartyHome() {
         setError(e instanceof Error ? e.message : String(e))
         setActive(null)
       })
+  }, [])
+
+  useEffect(() => {
+    setLibraryLoading(true)
+    void getPartyLibraryTracks(1)
+      .then((response) => { setPlaylists(response.playlists) })
+      .catch(() => { setPlaylists([]) })
+      .finally(() => { setLibraryLoading(false) })
   }, [])
 
   function goToSession(session: PartySession, asGuest = false) {
@@ -42,7 +56,11 @@ export default function PartyHome() {
   function handleCreate() {
     setLoading(true)
     setError(null)
-    void createPartySession()
+    void createPartySession({
+      source_playlist_id: sourcePlaylistId || undefined,
+      source_min_queue_size: sourcePlaylistId ? minimumQueueSize : 0,
+      add_added_tracks_to_source: true,
+    })
       .then(goToSession)
       .catch((e: unknown) => {
         setError(e instanceof Error ? e.message : String(e))
@@ -99,6 +117,37 @@ export default function PartyHome() {
       </div>
 
       <div className={styles.card}>
+        <label className={styles.setupField}>
+          <span className={styles.setupLabel}>Source playlist</span>
+          <select
+            className={styles.searchInput}
+            value={sourcePlaylistId}
+            onChange={(e) => { setSourcePlaylistId(e.target.value) }}
+            aria-label="Source playlist"
+          >
+            <option value="">{libraryLoading ? 'Loading playlists...' : 'No source playlist'}</option>
+            {playlists.map((playlist) => (
+              <option key={playlist.id} value={playlist.id}>
+                {playlist.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className={styles.setupField}>
+          <span className={styles.setupLabel}>Keep this many songs ready</span>
+          <input
+            className={styles.searchInput}
+            type="number"
+            min="0"
+            max="25"
+            value={minimumQueueSize}
+            onChange={(e) => { setMinimumQueueSize(clampInt(e.target.value, 0, 25)) }}
+            aria-label="Minimum queue size"
+          />
+        </label>
+      </div>
+
+      <div className={styles.card}>
         <input
           className={styles.searchInput}
           value={joinCode}
@@ -127,4 +176,10 @@ export default function PartyHome() {
       </div>
     </div>
   )
+}
+
+function clampInt(value: string, min: number, max: number): number {
+  const parsed = Number.parseInt(value, 10)
+  if (Number.isNaN(parsed)) return min
+  return Math.max(min, Math.min(max, parsed))
 }

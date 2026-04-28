@@ -83,7 +83,8 @@ impl HeartbeatDriver for PartyHeartbeat {
         Box::pin(async move {
             db::party::remove_first_queue_item_by_uri(&self.pool, self.session_id, track_uri)
                 .await?;
-            db::party::set_current_track(&self.pool, self.session_id, Some(track_uri)).await
+            db::party::set_current_track(&self.pool, self.session_id, Some(track_uri)).await?;
+            db::party::refill_queue_from_source(&self.pool, self.session_id).await
         })
     }
 
@@ -92,6 +93,7 @@ impl HeartbeatDriver for PartyHeartbeat {
         _session: &'a Self::Session,
     ) -> BoxFuture<'a, anyhow::Result<Option<String>>> {
         Box::pin(async move {
+            db::party::refill_queue_from_source(&self.pool, self.session_id).await?;
             Ok(db::party::first_queue_item(&self.pool, self.session_id)
                 .await?
                 .map(|item| item.track.uri.clone()))
