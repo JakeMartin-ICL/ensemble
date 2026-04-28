@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import QueueList from '../../components/QueueList'
@@ -94,9 +94,10 @@ export default function WeaveSession() {
 
   useEffect(() => {
     if (!session?.id) return
+    const sessionId = session.id
 
     function refreshPlayback() {
-      void getPlayback(session.id).then((p) => {
+      void getPlayback(sessionId).then((p) => {
         setPlayback(p ? { ...p, observed_at: Date.now() } : null)
       }).catch((e: unknown) => {
         setError(e instanceof Error ? e.message : String(e))
@@ -110,9 +111,10 @@ export default function WeaveSession() {
 
   useEffect(() => {
     if (!session?.id || !queueOpen) return
+    const sessionId = session.id
 
     function refreshQueue() {
-      void getQueue(session.id).then(setQueue).catch((e: unknown) => {
+      void getQueue(sessionId).then(setQueue).catch((e: unknown) => {
         setError(e instanceof Error ? e.message : String(e))
       })
     }
