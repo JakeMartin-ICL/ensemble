@@ -24,6 +24,8 @@ export default function QueueList<T extends PositionedItem>({
   canReorder = true,
   reorderScope = 'all',
   removeDropLabel = 'Remove',
+  pulseKey,
+  pulseToken = 0,
 }: {
   items: T[]
   getKey: (item: T) => string
@@ -36,6 +38,8 @@ export default function QueueList<T extends PositionedItem>({
   canReorder?: boolean
   reorderScope?: 'all' | 'group'
   removeDropLabel?: string
+  pulseKey?: string | null
+  pulseToken?: number
 }) {
   const [dragKey, setDragKey] = useState<string | null>(null)
   const [dragDelta, setDragDelta] = useState(0)
@@ -157,6 +161,39 @@ export default function QueueList<T extends PositionedItem>({
   }
 
   useEffect(() => resetDrag, [])
+
+  useEffect(() => {
+    if (!pulseKey) return
+
+    const el = itemElsRef.current.get(pulseKey)
+    if (!el) return
+
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    el.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'center' })
+    el.animate(
+      [
+        {
+          backgroundColor: 'rgba(29, 185, 84, 0.28)',
+          boxShadow: '0 0 0 0 rgba(29, 185, 84, 0.65)',
+          borderColor: 'rgba(29, 185, 84, 0.75)',
+        },
+        {
+          backgroundColor: 'rgba(29, 185, 84, 0.18)',
+          boxShadow: '0 0 0 9px rgba(29, 185, 84, 0)',
+          borderColor: 'rgba(29, 185, 84, 0.45)',
+        },
+        {
+          backgroundColor: 'var(--surface-2)',
+          boxShadow: '0 0 0 0 rgba(29, 185, 84, 0)',
+          borderColor: 'var(--border-subtle)',
+        },
+      ],
+      {
+        duration: reduceMotion ? 120 : 900,
+        easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)',
+      },
+    )
+  }, [pulseKey, pulseToken])
 
   useLayoutEffect(() => {
     if (dragKeyRef.current) {

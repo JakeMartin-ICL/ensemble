@@ -906,13 +906,12 @@ fn insert_track_after_current(
         .filter(|index| *index < playlist.order.len())
         .unwrap_or(0);
 
-    let source_index = playlist
-        .order
-        .iter()
-        .position(|candidate| candidate.uri == track.uri);
+    let source_index = queue_positions(playlist.order.len(), current_index)
+        .into_iter()
+        .find(|index| playlist.order[*index].uri == track.uri);
 
     let mut adjusted_current = current;
-    let item = if let Some(source) = source_index.filter(|source| *source != current) {
+    let item = if let Some(source) = source_index {
         let removed = playlist.order.remove(source);
         if source < adjusted_current {
             adjusted_current -= 1;

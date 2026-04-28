@@ -56,6 +56,8 @@ export default function PartySessionPage() {
   const [savingGuestPlaylists, setSavingGuestPlaylists] = useState(false)
   const [savingSourceSettings, setSavingSourceSettings] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [duplicatePulse, setDuplicatePulse] = useState<{ itemId: string; token: number } | null>(null)
+  const duplicatePulseTokenRef = useRef(0)
   const pendingRemovedIdsRef = useRef<Set<string>>(new Set())
   const settingsButtonRef = useRef<HTMLButtonElement | null>(null)
   const settingsPanelRef = useRef<HTMLDivElement | null>(null)
@@ -227,6 +229,13 @@ export default function PartySessionPage() {
 
   function handleAdd(item: TrackSearchResult) {
     if (!session) return Promise.resolve()
+    const existing = session.is_host ? queue.items.find((queuedItem) => queuedItem.uri === item.uri) : null
+    if (existing) {
+      duplicatePulseTokenRef.current += 1
+      setDuplicatePulse({ itemId: existing.id, token: duplicatePulseTokenRef.current })
+      return Promise.resolve()
+    }
+
     return addPartyQueueTrack(session.id, item)
       .then((q) => { setQueue(filterPendingRemoved(q, pendingRemovedIdsRef.current)) })
       .then(() => { refreshSourceQueue(session.id) })
@@ -489,6 +498,7 @@ export default function PartySessionPage() {
         queue={queue}
         canEditQueue={canEditQueue(session)}
         canAddPlaylists={canAddPlaylists(session)}
+        duplicatePulse={duplicatePulse}
         libraryTracks={libraryTracks}
         libraryPlaylists={libraryPlaylists}
         libraryLoading={libraryLoading}
@@ -537,6 +547,7 @@ function PartyQueuePanel({
   queue,
   canEditQueue,
   canAddPlaylists,
+  duplicatePulse,
   libraryTracks,
   libraryPlaylists,
   libraryLoading,
@@ -549,6 +560,7 @@ function PartyQueuePanel({
   queue: PartyQueueState
   canEditQueue: boolean
   canAddPlaylists: boolean
+  duplicatePulse: { itemId: string; token: number } | null
   libraryTracks: TrackSearchResult[]
   libraryPlaylists: PartyPlaylistSearchResult[]
   libraryLoading: boolean
@@ -828,6 +840,8 @@ function PartyQueuePanel({
           getKey={(item) => item.id}
           getColor={() => '#1db954'}
           canReorder={canEditQueue}
+          pulseKey={duplicatePulse?.itemId}
+          pulseToken={duplicatePulse?.token}
           onReorder={onReorder}
           onRemoveDrop={canEditQueue ? onRemove : undefined}
           removeDropLabel="Remove"
