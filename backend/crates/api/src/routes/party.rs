@@ -4,12 +4,12 @@ use axum::{
     extract::{Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use std::{collections::HashSet, str::FromStr};
+use std::{collections::HashMap, collections::HashSet, str::FromStr};
 use uuid::Uuid;
 
 use crate::AppState;
@@ -54,6 +54,9 @@ pub fn router() -> Router<AppState> {
         .route("/sessions/{id}/queue/search", get(search_queue_tracks))
         .route("/sessions/{id}/queue/reorder", post(reorder_queue))
         .route("/sessions/{id}/queue/remove", post(remove_queue_track))
+        .route("/sessions/{id}/queue/{item_id}/vote", post(vote_queue_item))
+        .route("/sessions/{id}/queue/{item_id}/vote", delete(unvote_queue_item))
+        .route("/sessions/{id}/queue/{item_id}/pin", delete(unpin_queue_item))
         .route("/sessions/{id}/export", get(get_export_preview))
         .route("/sessions/{id}/export/playlist", post(export_playlist))
         .route("/sessions/{id}/export/csv", get(export_csv))
@@ -156,6 +159,12 @@ struct ExportItemResponse {
 }
 
 #[derive(serde::Serialize, Clone)]
+struct VoterResponse {
+    user_id: Uuid,
+    display_name: Option<String>,
+}
+
+#[derive(serde::Serialize, Clone)]
 struct QueueItemResponse {
     id: Uuid,
     uri: String,
@@ -164,6 +173,10 @@ struct QueueItemResponse {
     album_art_url: Option<String>,
     duration_ms: Option<u64>,
     position: usize,
+    pin_position: Option<i32>,
+    vote_count: i64,
+    user_voted: bool,
+    voters: Vec<VoterResponse>,
     added_by_user_id: Option<Uuid>,
     added_by_display_name: Option<String>,
 }
@@ -271,6 +284,11 @@ struct ExportPlaylistResponse {
     playlist_id: String,
     url: String,
     track_count: usize,
+}
+
+#[derive(serde::Deserialize)]
+struct VoteQueueItemBody {
+    vote: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -553,12 +571,12 @@ async fn get_queue(
     headers: HeaderMap,
     Path(session_id): Path<Uuid>,
 ) -> ApiResult<QueueResponse> {
-    crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
     get_existing_session(&state, session_id).await?;
     db::party::refill_queue_from_source(&state.pool, session_id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(build_queue_response(&state, session_id).await?))
+    Ok(Json(build_queue_response(&state, session_id, user_id).await?))
 }
 
 async fn update_mode(
@@ -568,9 +586,19 @@ async fn update_mode(
     Json(body): Json<UpdateModeBody>,
 ) -> ApiResult<SessionResponse> {
     let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
-    get_host_session(&state, session_id, user_id).await?;
+    let current = get_host_session(&state, session_id, user_id).await?;
     let mode =
         db::party::PartyMode::from_str(&body.mode).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
+
+    if mode == db::party::PartyMode::VotedQueue {
+        db::party::sort_voted_queue(&state.pool, session_id)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    } else if current.mode == db::party::PartyMode::VotedQueue.as_str() {
+        db::party::clear_all_pins(&state.pool, session_id)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    }
 
     let session = db::party::set_mode(&state.pool, session_id, mode)
         .await
@@ -697,7 +725,7 @@ async fn add_queue_track(
         duration_ms: body.track.duration_ms,
     };
 
-    db::party::add_queue_item(
+    let item = db::party::add_queue_item(
         &state.pool,
         &db::party::NewPartyQueueItem {
             session_id,
@@ -715,7 +743,16 @@ async fn add_queue_track(
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
 
-    Ok(Json(build_queue_response(&state, session_id).await?))
+    if session.mode == db::party::PartyMode::VotedQueue.as_str() {
+        db::party::vote_queue_item(&state.pool, session_id, item.id, user_id)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        db::party::sort_voted_queue(&state.pool, session_id)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    }
+
+    Ok(Json(build_queue_response(&state, session_id, user_id).await?))
 }
 
 async fn add_queue_playlist(
@@ -760,7 +797,7 @@ async fn add_queue_playlist(
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    Ok(Json(build_queue_response(&state, session_id).await?))
+    Ok(Json(build_queue_response(&state, session_id, user_id).await?))
 }
 
 async fn get_source_queue(
@@ -799,24 +836,34 @@ async fn reorder_queue(
     Json(body): Json<ReorderQueueBody>,
 ) -> ApiResult<QueueResponse> {
     let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
-    get_queue_editor_session(&state, session_id, user_id).await?;
+    let session = get_queue_editor_session(&state, session_id, user_id).await?;
 
-    let items = db::party::queue_items(&state.pool, session_id)
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let mut ids = items.iter().map(|item| item.id).collect::<Vec<_>>();
-    let Some(from_position) = ids.iter().position(|id| *id == body.item_id) else {
-        return Err(err(StatusCode::NOT_FOUND, "queue item not found"));
-    };
-    let item_id = ids.remove(from_position);
-    let to_position = body.to_position.min(ids.len());
-    ids.insert(to_position, item_id);
+    if session.mode == db::party::PartyMode::VotedQueue.as_str() {
+        let pin_position = i32::try_from(body.to_position).unwrap_or(i32::MAX);
+        db::party::set_queue_item_pin(&state.pool, session_id, body.item_id, pin_position)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        db::party::sort_voted_queue(&state.pool, session_id)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    } else {
+        let items = db::party::queue_items(&state.pool, session_id)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        let mut ids = items.iter().map(|item| item.id).collect::<Vec<_>>();
+        let Some(from_position) = ids.iter().position(|id| *id == body.item_id) else {
+            return Err(err(StatusCode::NOT_FOUND, "queue item not found"));
+        };
+        let item_id = ids.remove(from_position);
+        let to_position = body.to_position.min(ids.len());
+        ids.insert(to_position, item_id);
 
-    db::party::update_queue_positions(&state.pool, session_id, &ids)
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        db::party::update_queue_positions(&state.pool, session_id, &ids)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    }
 
-    Ok(Json(build_queue_response(&state, session_id).await?))
+    Ok(Json(build_queue_response(&state, session_id, user_id).await?))
 }
 
 async fn remove_queue_track(
@@ -828,6 +875,8 @@ async fn remove_queue_track(
     let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
     get_queue_editor_session(&state, session_id, user_id).await?;
 
+    let session = get_queue_editor_session(&state, session_id, user_id).await?;
+
     db::party::remove_queue_item(&state.pool, session_id, body.item_id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -835,7 +884,75 @@ async fn remove_queue_track(
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    Ok(Json(build_queue_response(&state, session_id).await?))
+    if session.mode == db::party::PartyMode::VotedQueue.as_str() {
+        db::party::sort_voted_queue(&state.pool, session_id)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    }
+
+    Ok(Json(build_queue_response(&state, session_id, user_id).await?))
+}
+
+async fn vote_queue_item(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((session_id, item_id)): Path<(Uuid, Uuid)>,
+    Json(body): Json<VoteQueueItemBody>,
+) -> ApiResult<QueueResponse> {
+    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    get_existing_session(&state, session_id).await?;
+
+    if body.vote {
+        db::party::vote_queue_item(&state.pool, session_id, item_id, user_id)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    } else {
+        db::party::unvote_queue_item(&state.pool, session_id, item_id, user_id)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    }
+
+    db::party::sort_voted_queue(&state.pool, session_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(build_queue_response(&state, session_id, user_id).await?))
+}
+
+async fn unvote_queue_item(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((session_id, item_id)): Path<(Uuid, Uuid)>,
+) -> ApiResult<QueueResponse> {
+    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    get_existing_session(&state, session_id).await?;
+
+    db::party::unvote_queue_item(&state.pool, session_id, item_id, user_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    db::party::sort_voted_queue(&state.pool, session_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(build_queue_response(&state, session_id, user_id).await?))
+}
+
+async fn unpin_queue_item(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((session_id, item_id)): Path<(Uuid, Uuid)>,
+) -> ApiResult<QueueResponse> {
+    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    get_host_session(&state, session_id, user_id).await?;
+
+    db::party::clear_queue_item_pin(&state.pool, session_id, item_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    db::party::sort_voted_queue(&state.pool, session_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(build_queue_response(&state, session_id, user_id).await?))
 }
 
 async fn get_export_preview(
@@ -989,22 +1106,46 @@ async fn get_track(
 async fn build_queue_response(
     state: &AppState,
     session_id: Uuid,
+    user_id: Uuid,
 ) -> Result<QueueResponse, (StatusCode, Json<Value>)> {
     let items = db::party::queue_items(&state.pool, session_id)
         .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let raw_votes = db::party::votes_for_queue_items(&state.pool, session_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let mut vote_map: HashMap<Uuid, Vec<VoterResponse>> = HashMap::new();
+    for vote in raw_votes {
+        vote_map.entry(vote.queue_item_id).or_default().push(VoterResponse {
+            user_id: vote.user_id,
+            display_name: vote.display_name,
+        });
+    }
+
+    let items = items
         .into_iter()
         .enumerate()
-        .map(|(position, item)| QueueItemResponse {
-            id: item.id,
-            uri: item.track.uri.clone(),
-            name: item.track.name.clone(),
-            artist: item.track.artist.clone(),
-            album_art_url: item.track.album_art_url.clone(),
-            duration_ms: item.track.duration_ms,
-            position,
-            added_by_user_id: item.added_by_user_id,
-            added_by_display_name: item.added_by_display_name,
+        .map(|(position, item)| {
+            let voters = vote_map.get(&item.id).cloned().unwrap_or_default();
+            let vote_count = voters.len() as i64;
+            let user_voted = voters.iter().any(|v| v.user_id == user_id);
+            QueueItemResponse {
+                id: item.id,
+                uri: item.track.uri.clone(),
+                name: item.track.name.clone(),
+                artist: item.track.artist.clone(),
+                album_art_url: item.track.album_art_url.clone(),
+                duration_ms: item.track.duration_ms,
+                position,
+                pin_position: item.pin_position,
+                vote_count,
+                user_voted,
+                voters,
+                added_by_user_id: item.added_by_user_id,
+                added_by_display_name: item.added_by_display_name,
+            }
         })
         .collect();
 

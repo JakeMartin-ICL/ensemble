@@ -1756,3 +1756,177 @@
   right: auto;
   transform: none;
 }
+
+/* Queue item actions slot (holds vote badge + attribution) */
+.queueItemActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  position: absolute;
+  top: 50%;
+  right: 14px;
+  transform: translateY(-50%);
+}
+
+/* When attribution badge is inside queueItemActions, make it in-flow */
+.queueItemActions .queueAttributionBadge {
+  position: relative;
+  top: auto;
+  right: auto;
+  transform: none;
+}
+
+/* Wrapper for vote button + voter bubble */
+.voteWrapper {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+/* Upvote button */
+.voteBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 7px 3px 5px;
+  border: 1px solid rgba(248, 247, 255, 0.14);
+  border-radius: 999px;
+  background: rgba(248, 247, 255, 0.05);
+  color: rgba(248, 247, 255, 0.45);
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 0.14s ease, border-color 0.14s ease, background 0.14s ease, transform 0.14s ease;
+}
+
+.voteBadge:hover {
+  color: rgba(248, 247, 255, 0.75);
+  border-color: rgba(248, 247, 255, 0.28);
+  background: rgba(248, 247, 255, 0.09);
+  transform: translateY(-1px);
+}
+
+.voteBadgeActive {
+  color: #a78bfa;
+  border-color: rgba(167, 139, 250, 0.5);
+  background: rgba(167, 139, 250, 0.1);
+}
+
+.voteBadgeActive:hover {
+  color: #c4b5fd;
+  border-color: rgba(196, 181, 253, 0.6);
+  background: rgba(167, 139, 250, 0.16);
+}
+
+.voteCount {
+  font-variant-numeric: tabular-nums;
+}
+
+.upvoteIconSvg {
+  width: 13px;
+  height: 13px;
+  fill: currentColor;
+  display: block;
+  flex-shrink: 0;
+}
+
+/* Pin badge */
+.voteBadgeGroup {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.pinBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid rgba(167, 139, 250, 0.35);
+  border-radius: 50%;
+  background: rgba(167, 139, 250, 0.1);
+  color: #a78bfa;
+  cursor: pointer;
+  transition: background 0.14s ease, border-color 0.14s ease, transform 0.14s ease;
+}
+
+.pinBadge:hover {
+  background: rgba(167, 139, 250, 0.2);
+  border-color: rgba(167, 139, 250, 0.55);
+  transform: translateY(-1px);
+}
+
+.pinBadgeStatic {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid rgba(167, 139, 250, 0.25);
+  border-radius: 50%;
+  background: rgba(167, 139, 250, 0.07);
+  color: rgba(167, 139, 250, 0.6);
+  pointer-events: none;
+}
+
+.pinIconSvg {
+  width: 13px;
+  height: 13px;
+  fill: currentColor;
+  display: block;
+}
+
+/* Voter bubble (shows on hover / tap-hold over vote button) */
+.voterBubble {
+  position: absolute;
+  right: 50%;
+  bottom: calc(100% + 8px);
+  z-index: 45;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid rgba(248, 247, 255, 0.18);
+  border-radius: 12px;
+  background: rgba(20, 20, 30, 0.96);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.38);
+  opacity: 0;
+  transform: translateX(50%) translateY(4px) scale(0.96);
+  animation: attributionBubbleIn 0.16s ease-out forwards;
+  pointer-events: auto;
+  white-space: nowrap;
+}
+
+.voterBubbleClosing {
+  animation: attributionBubbleOut 0.16s ease-in forwards;
+}
+
+.voterInitialsList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  justify-content: center;
+  max-width: 160px;
+}
+
+.voterInitial {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid rgba(248, 247, 255, 0.16);
+  border-radius: 50%;
+  background: rgba(248, 247, 255, 0.08);
+  color: rgba(248, 247, 255, 0.75);
+  font-family: var(--sans);
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+  cursor: default;
+}

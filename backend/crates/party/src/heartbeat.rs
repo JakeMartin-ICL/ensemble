@@ -94,7 +94,7 @@ impl HeartbeatDriver for PartyHeartbeat {
 
     fn promote_queued_track<'a>(
         &'a self,
-        _session: &'a Self::Session,
+        session: &'a Self::Session,
         track_uri: &'a str,
     ) -> BoxFuture<'a, anyhow::Result<()>> {
         Box::pin(async move {
@@ -121,16 +121,23 @@ impl HeartbeatDriver for PartyHeartbeat {
                 },
             )
             .await?;
-            db::party::refill_queue_from_source(&self.pool, self.session_id).await
+            db::party::refill_queue_from_source(&self.pool, self.session_id).await?;
+            if session.mode == db::party::PartyMode::VotedQueue.as_str() {
+                db::party::sort_voted_queue(&self.pool, self.session_id).await?;
+            }
+            Ok(())
         })
     }
 
     fn next_track_uri<'a>(
         &'a self,
-        _session: &'a Self::Session,
+        session: &'a Self::Session,
     ) -> BoxFuture<'a, anyhow::Result<Option<String>>> {
         Box::pin(async move {
             db::party::refill_queue_from_source(&self.pool, self.session_id).await?;
+            if session.mode == db::party::PartyMode::VotedQueue.as_str() {
+                db::party::sort_voted_queue(&self.pool, self.session_id).await?;
+            }
             Ok(db::party::first_queue_item(&self.pool, self.session_id)
                 .await?
                 .map(|item| item.track.uri.clone()))

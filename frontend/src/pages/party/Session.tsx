@@ -32,8 +32,10 @@ import {
   searchPartyTracks,
   setPartySourceQueueItemDisabled,
   skipPartySession,
+  unpinPartyQueueItem,
   updatePartyMode,
   updatePartySettings,
+  votePartyQueueItem,
 } from '../../lib/party'
 import type { PlaybackState, TrackDetails, TrackSearchResult } from '../../lib/weave'
 import styles from '../../styles/Mode.module.css'
@@ -185,6 +187,17 @@ export default function PartySessionPage() {
       .on(
         'postgres_changes',
         {
+          event: '*',
+          schema: 'public',
+          table: 'party_queue_votes',
+        },
+        () => {
+          refreshQueues(session.id)
+        },
+      )
+      .on(
+        'postgres_changes',
+        {
           event: 'UPDATE',
           schema: 'public',
           table: 'party_sessions',
@@ -308,8 +321,29 @@ export default function PartySessionPage() {
   function handleReorder(item: PartyQueueItem, toPosition: number) {
     if (!session || !canEditQueue(session)) return
     if (toPosition < 0 || toPosition >= queue.items.length) return
-    setQueue(applyMove(queue, item.id, toPosition))
+    if (session.mode !== 'voted_queue') {
+      setQueue(applyMove(queue, item.id, toPosition))
+    }
     void reorderPartyQueue(session.id, item.id, toPosition)
+      .then((q) => { setQueue(filterPendingRemoved(q, pendingRemovedIdsRef.current)) })
+      .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
+  }
+
+  function handleVote(item: PartyQueueItem) {
+    if (!session) return
+    const newVote = !item.user_voted
+    setQueue((q) => ({
+      ...q,
+      items: q.items.map((i) => i.id === item.id ? { ...i, user_voted: newVote, vote_count: i.vote_count + (newVote ? 1 : -1) } : i),
+    }))
+    void votePartyQueueItem(session.id, item.id, newVote)
+      .then((q) => { setQueue(filterPendingRemoved(q, pendingRemovedIdsRef.current)) })
+      .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
+  }
+
+  function handleUnpin(item: PartyQueueItem) {
+    if (!session?.is_host) return
+    void unpinPartyQueueItem(session.id, item.id)
       .then((q) => { setQueue(filterPendingRemoved(q, pendingRemovedIdsRef.current)) })
       .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
   }
@@ -656,6 +690,7 @@ export default function PartySessionPage() {
       <PartyQueuePanel
         sessionId={session.id}
         queue={queue}
+        session={session}
         showAttribution={session.show_queue_attribution}
         canEditQueue={canEditQueue(session)}
         canAddPlaylists={canAddPlaylists(session)}
@@ -667,6 +702,8 @@ export default function PartySessionPage() {
         onAddPlaylist={handleAddPlaylist}
         onReorder={handleReorder}
         onRemove={handleRemove}
+        onVote={handleVote}
+        onUnpin={handleUnpin}
       />
 
       {sourceQueueOpen && sourceQueue && (
@@ -802,6 +839,7 @@ function exportPlaylistName() {
 function PartyQueuePanel({
   sessionId,
   queue,
+  session,
   showAttribution,
   canEditQueue,
   canAddPlaylists,
@@ -813,9 +851,12 @@ function PartyQueuePanel({
   onAddPlaylist,
   onReorder,
   onRemove,
+  onVote,
+  onUnpin,
 }: {
   sessionId: string
   queue: PartyQueueState
+  session: PartySession
   showAttribution: boolean
   canEditQueue: boolean
   canAddPlaylists: boolean
@@ -827,6 +868,8 @@ function PartyQueuePanel({
   onAddPlaylist: (playlist: PartyPlaylistSearchResult) => Promise<void>
   onReorder: (item: PartyQueueItem, toPosition: number) => void
   onRemove: (item: PartyQueueItem) => void
+  onVote: (item: PartyQueueItem) => void
+  onUnpin: (item: PartyQueueItem) => void
 }) {
   const [query, setQuery] = useState('')
   const [localResults, setLocalResults] = useState<TrackSearchResult[]>([])
@@ -1097,16 +1140,26 @@ function PartyQueuePanel({
         <QueueList
           items={queue.items}
           getKey={(item) => item.id}
-          getColor={() => '#1db954'}
+          getColor={(item) => item.pin_position != null && session.mode === 'voted_queue' ? '#a78bfa' : '#1db954'}
           canReorder={canEditQueue}
           pulseKey={duplicatePulse?.itemId}
           pulseToken={duplicatePulse?.token}
           onReorder={onReorder}
-          onTopDrop={canEditQueue ? (item) => { onReorder(item, 0) } : undefined}
+          onTopDrop={canEditQueue && session.mode !== 'voted_queue' ? (item) => { onReorder(item, 0) } : undefined}
           onRemoveDrop={canEditQueue ? onRemove : undefined}
           removeDropLabel="Remove"
           renderActions={(item) => (
-            showAttribution ? <AttributionBadge name={item.added_by_display_name} /> : null
+            <span className={styles.queueItemActions}>
+              {session.mode === 'voted_queue' && (
+                <VoteBadge
+                  item={item}
+                  isHost={session.is_host}
+                  onVote={onVote}
+                  onUnpin={onUnpin}
+                />
+              )}
+              {showAttribution && <AttributionBadge name={item.added_by_display_name} />}
+            </span>
           )}
           renderItem={(item) => <QueueTrackLabel item={item} />}
         />
@@ -1350,6 +1403,19 @@ function PartyModePanel({
           <span className={styles.partyModeMeta}>Everyone can add, reorder, and remove.</span>
         </span>
       </button>
+      <button
+        className={`${styles.partyModeOption}${mode === 'voted_queue' ? ` ${styles.partyModeOptionActive}` : ''}`}
+        onClick={() => { onModeChange('voted_queue') }}
+        disabled={savingMode !== null}
+        type="button"
+        aria-pressed={mode === 'voted_queue'}
+      >
+        <span className={styles.partyModeIcon}><VoteIcon /></span>
+        <span>
+          <span className={styles.partyModeTitle}>Votes</span>
+          <span className={styles.partyModeMeta}>Guests upvote songs. Queue sorts by popularity.</span>
+        </span>
+      </button>
     </div>
   )
 }
@@ -1580,6 +1646,133 @@ function AttributionBadge({ name }: { name: string | null }) {
   )
 }
 
+function VoteBadge({
+  item,
+  isHost,
+  onVote,
+  onUnpin,
+}: {
+  item: PartyQueueItem
+  isHost: boolean
+  onVote: (item: PartyQueueItem) => void
+  onUnpin: (item: PartyQueueItem) => void
+}) {
+  const [votersOpen, setVotersOpen] = useState(false)
+  const [votersClosing, setVotersClosing] = useState(false)
+  const voterTimerRef = useRef<number | null>(null)
+  const voterCloseTimerRef = useRef<number | null>(null)
+  const longPressTimerRef = useRef<number | null>(null)
+
+  function showVoters() {
+    setVotersOpen(true)
+    setVotersClosing(false)
+    if (voterTimerRef.current !== null) window.clearTimeout(voterTimerRef.current)
+    if (voterCloseTimerRef.current !== null) window.clearTimeout(voterCloseTimerRef.current)
+    voterTimerRef.current = window.setTimeout(hideVoters, 2400)
+  }
+
+  function hideVoters() {
+    if (!votersOpen || votersClosing) return
+    setVotersClosing(true)
+    if (voterTimerRef.current !== null) window.clearTimeout(voterTimerRef.current)
+    voterCloseTimerRef.current = window.setTimeout(() => {
+      setVotersOpen(false)
+      setVotersClosing(false)
+    }, 160)
+  }
+
+  function handleVoterClick() {
+    if (votersOpen) hideVoters()
+    else showVoters()
+  }
+
+  function handleTouchStart() {
+    longPressTimerRef.current = window.setTimeout(() => {
+      longPressTimerRef.current = null
+      showVoters()
+    }, 400)
+  }
+
+  function handleTouchEnd() {
+    if (longPressTimerRef.current !== null) {
+      window.clearTimeout(longPressTimerRef.current)
+      longPressTimerRef.current = null
+    }
+  }
+
+  useEffect(() => () => {
+    if (voterTimerRef.current !== null) window.clearTimeout(voterTimerRef.current)
+    if (voterCloseTimerRef.current !== null) window.clearTimeout(voterCloseTimerRef.current)
+    if (longPressTimerRef.current !== null) window.clearTimeout(longPressTimerRef.current)
+  }, [])
+
+  const isPinned = item.pin_position != null
+
+  return (
+    <span className={styles.voteBadgeGroup}>
+      {isPinned && isHost && (
+        <button
+          className={styles.pinBadge}
+          onClick={() => { onUnpin(item) }}
+          type="button"
+          aria-label="Unpin track"
+          title="Unpin — let votes decide"
+        >
+          <PinIcon />
+        </button>
+      )}
+      {isPinned && !isHost && (
+        <span className={styles.pinBadgeStatic} aria-label="Pinned by host">
+          <PinIcon />
+        </span>
+      )}
+      <span className={styles.voteWrapper}>
+        <button
+          className={[
+            styles.voteBadge,
+            item.user_voted ? styles.voteBadgeActive : '',
+          ].filter(Boolean).join(' ')}
+          onClick={() => { onVote(item) }}
+          onMouseEnter={item.voters.length > 0 ? showVoters : undefined}
+          onMouseLeave={item.voters.length > 0 ? hideVoters : undefined}
+          onFocus={item.voters.length > 0 ? showVoters : undefined}
+          onBlur={item.voters.length > 0 ? hideVoters : undefined}
+          onTouchStart={item.voters.length > 0 ? handleTouchStart : undefined}
+          onTouchEnd={item.voters.length > 0 ? handleTouchEnd : undefined}
+          onTouchCancel={item.voters.length > 0 ? handleTouchEnd : undefined}
+          type="button"
+          aria-label={item.user_voted ? 'Remove vote' : 'Upvote'}
+          aria-pressed={item.user_voted}
+        >
+          <UpvoteIcon />
+          <span className={styles.voteCount}>{item.vote_count}</span>
+        </button>
+        {votersOpen && item.voters.length > 0 && (
+          <span
+            className={[
+              styles.voterBubble,
+              votersClosing ? styles.voterBubbleClosing : '',
+            ].filter(Boolean).join(' ')}
+            onMouseEnter={showVoters}
+            onMouseLeave={hideVoters}
+            onClick={handleVoterClick}
+            role="tooltip"
+            aria-label="Voters"
+          >
+            <span className={styles.voterInitialsList}>
+              {item.voters.map((v) => (
+                <span key={v.user_id} className={styles.voterInitial} title={v.display_name ?? 'Unknown'}>
+                  {initials(v.display_name ?? 'Unknown')}
+                </span>
+              ))}
+            </span>
+          </span>
+        )}
+      </span>
+    </span>
+  )
+}
+
 function IconSvg({ children }: { children: React.ReactNode }) {
   return (
     <svg className={styles.iconSvg} viewBox="0 0 24 24" aria-hidden="true">
@@ -1633,6 +1826,30 @@ function QueueEditIcon() {
     <IconSvg>
       <path d="M4 6h10v2H4V6Zm0 5h16v2H4v-2Zm0 5h10v2H4v-2Zm13.3-9.7 1.4-1.4L22 8.2l-1.4 1.4-3.3-3.3Zm-1.4 1.4 3.3 3.3-5.2 5.2H10.7v-3.3l5.2-5.2Z" />
     </IconSvg>
+  )
+}
+
+function VoteIcon() {
+  return (
+    <IconSvg>
+      <path d="M12 2 4.5 20.29l.71.71L12 18l6.79 3 .71-.71z" />
+    </IconSvg>
+  )
+}
+
+function UpvoteIcon() {
+  return (
+    <svg className={styles.upvoteIconSvg} viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 4 5 11h4v9h6v-9h4z" />
+    </svg>
+  )
+}
+
+function PinIcon() {
+  return (
+    <svg className={styles.pinIconSvg} viewBox="0 0 24 24" aria-hidden="true">
+      <path d="m16 12 1-7H7l1 7-4 3h5v6l3 1 3-1v-6h5z" />
+    </svg>
   )
 }
 
@@ -1793,7 +2010,9 @@ function canAddPlaylists(session: PartySession): boolean {
 }
 
 function modeLabel(mode: PartyMode): string {
-  return mode === 'shared_queue' ? 'Shared queue' : 'Add only'
+  if (mode === 'shared_queue') return 'Shared queue'
+  if (mode === 'voted_queue') return 'Votes'
+  return 'Add only'
 }
 
 function sourceLabel(source: string): string {

@@ -45,3 +45,12 @@ export async function getBlob(path: string, headers?: Record<string, string>): P
   if (!res.ok) throw new Error(await errorMessage(res))
   return res.blob()
 }
+
+export async function del<T>(path: string, headers?: Record<string, string>): Promise<T> {
+  const res = await fetch(`${BASE_URL}${path}`, {
+    method: 'DELETE',
+    headers: { ...authHeaders(), ...headers },
+  })
+  if (!res.ok) throw new Error(await errorMessage(res))
+  return res.json() as Promise<T>
+}

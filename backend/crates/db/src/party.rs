@@ -36,10 +36,18 @@ pub struct PartyQueueItem {
     pub id: Uuid,
     pub session_id: Uuid,
     pub position: i32,
+    pub pin_position: Option<i32>,
     pub track: Json<PartyTrack>,
     pub added_by_user_id: Option<Uuid>,
     pub added_by_display_name: Option<String>,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct PartyQueueVote {
+    pub queue_item_id: Uuid,
+    pub user_id: Uuid,
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -96,6 +104,7 @@ pub struct NewPartyPlayedTrack {
 pub enum PartyMode {
     OpenQueue,
     SharedQueue,
+    VotedQueue,
 }
 
 impl PartyMode {
@@ -103,6 +112,7 @@ impl PartyMode {
         match self {
             Self::OpenQueue => "open_queue",
             Self::SharedQueue => "shared_queue",
+            Self::VotedQueue => "voted_queue",
         }
     }
 }
@@ -114,6 +124,7 @@ impl std::str::FromStr for PartyMode {
         match value {
             "open_queue" => Ok(Self::OpenQueue),
             "shared_queue" => Ok(Self::SharedQueue),
+            "voted_queue" => Ok(Self::VotedQueue),
             _ => Err(anyhow::anyhow!("unsupported party mode")),
         }
     }
@@ -439,7 +450,7 @@ pub async fn played_tracks(
 pub async fn queue_items(pool: &PgPool, session_id: Uuid) -> anyhow::Result<Vec<PartyQueueItem>> {
     let items = sqlx::query_as::<_, PartyQueueItem>(
         r#"
-        SELECT q.id, q.session_id, q.position, q.track, q.added_by_user_id,
+        SELECT q.id, q.session_id, q.position, q.pin_position, q.track, q.added_by_user_id,
                u.display_name AS added_by_display_name, q.created_at
         FROM public.party_queue_items q
         LEFT JOIN public.users u ON u.id = q.added_by_user_id
@@ -460,7 +471,7 @@ pub async fn first_queue_item(
 ) -> anyhow::Result<Option<PartyQueueItem>> {
     let item = sqlx::query_as::<_, PartyQueueItem>(
         r#"
-        SELECT q.id, q.session_id, q.position, q.track, q.added_by_user_id,
+        SELECT q.id, q.session_id, q.position, q.pin_position, q.track, q.added_by_user_id,
                u.display_name AS added_by_display_name, q.created_at
         FROM public.party_queue_items q
         LEFT JOIN public.users u ON u.id = q.added_by_user_id
@@ -520,7 +531,8 @@ pub async fn add_queue_item(
         r#"
         INSERT INTO public.party_queue_items (session_id, position, track, added_by_user_id)
         VALUES ($1, $2, $3, $4)
-        RETURNING id, session_id, position, track, added_by_user_id, NULL::text AS added_by_display_name, created_at
+        RETURNING id, session_id, position, NULL::integer AS pin_position, track, added_by_user_id,
+                  NULL::text AS added_by_display_name, created_at
         "#,
     )
     .bind(item.session_id)
@@ -769,6 +781,16 @@ pub async fn remove_queue_item(
     session_id: Uuid,
     item_id: Uuid,
 ) -> anyhow::Result<()> {
+    let position = sqlx::query_scalar::<_, Option<i32>>(
+        "SELECT position FROM public.party_queue_items WHERE id = $1 AND session_id = $2",
+    )
+    .bind(item_id)
+    .bind(session_id)
+    .fetch_one(pool)
+    .await
+    .context("fetching position of queue item to remove")?
+    .unwrap_or(0);
+
     sqlx::query("DELETE FROM public.party_queue_items WHERE id = $1 AND session_id = $2")
         .bind(item_id)
         .bind(session_id)
@@ -776,6 +798,7 @@ pub async fn remove_queue_item(
         .await
         .context("removing party queue item")?;
 
+    decrement_pins_after_position(pool, session_id, position).await?;
     compact_queue_positions(pool, session_id).await
 }
 
@@ -793,7 +816,8 @@ pub async fn pop_next_queue_item(
             ORDER BY position ASC, created_at ASC
             LIMIT 1
         )
-        RETURNING id, session_id, position, track, added_by_user_id, NULL::text AS added_by_display_name, created_at
+        RETURNING id, session_id, position, NULL::integer AS pin_position, track, added_by_user_id,
+                  NULL::text AS added_by_display_name, created_at
         "#,
     )
     .bind(session_id)
@@ -801,6 +825,7 @@ pub async fn pop_next_queue_item(
     .await
     .context("popping next party queue item")?;
 
+    decrement_pins_after_position(pool, session_id, -1).await?;
     compact_queue_positions(pool, session_id).await?;
 
     Ok(item)
@@ -821,7 +846,8 @@ pub async fn remove_first_queue_item_by_uri(
             ORDER BY position ASC, created_at ASC
             LIMIT 1
         )
-        RETURNING id, session_id, position, track, added_by_user_id, NULL::text AS added_by_display_name, created_at
+        RETURNING id, session_id, position, NULL::integer AS pin_position, track, added_by_user_id,
+                  NULL::text AS added_by_display_name, created_at
         "#,
     )
     .bind(session_id)
@@ -830,6 +856,8 @@ pub async fn remove_first_queue_item_by_uri(
     .await
     .context("removing first party queue item by uri")?;
 
+    let removed_position = item.as_ref().map(|i| i.position).unwrap_or(0);
+    decrement_pins_after_position(pool, session_id, removed_position - 1).await?;
     compact_queue_positions(pool, session_id).await?;
 
     Ok(item)
@@ -993,4 +1021,221 @@ async fn compact_queue_positions(pool: &PgPool, session_id: Uuid) -> anyhow::Res
         .context("touching party session after queue compaction")?;
 
     Ok(())
+}
+
+async fn decrement_pins_after_position(
+    pool: &PgPool,
+    session_id: Uuid,
+    removed_position: i32,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE public.party_queue_items
+        SET pin_position = pin_position - 1
+        WHERE session_id = $1
+          AND pin_position IS NOT NULL
+          AND pin_position > $2
+        "#,
+    )
+    .bind(session_id)
+    .bind(removed_position)
+    .execute(pool)
+    .await
+    .context("decrementing pin positions after queue item removal")?;
+    Ok(())
+}
+
+pub async fn clear_all_pins(pool: &PgPool, session_id: Uuid) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE public.party_queue_items SET pin_position = NULL WHERE session_id = $1",
+    )
+    .bind(session_id)
+    .execute(pool)
+    .await
+    .context("clearing all queue item pins")?;
+    Ok(())
+}
+
+pub async fn set_queue_item_pin(
+    pool: &PgPool,
+    session_id: Uuid,
+    item_id: Uuid,
+    pin_position: i32,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE public.party_queue_items
+        SET pin_position = $1
+        WHERE id = $2 AND session_id = $3
+        "#,
+    )
+    .bind(pin_position)
+    .bind(item_id)
+    .bind(session_id)
+    .execute(pool)
+    .await
+    .context("setting queue item pin position")?;
+    Ok(())
+}
+
+pub async fn clear_queue_item_pin(
+    pool: &PgPool,
+    session_id: Uuid,
+    item_id: Uuid,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE public.party_queue_items
+        SET pin_position = NULL
+        WHERE id = $1 AND session_id = $2
+        "#,
+    )
+    .bind(item_id)
+    .bind(session_id)
+    .execute(pool)
+    .await
+    .context("clearing queue item pin position")?;
+    Ok(())
+}
+
+pub async fn vote_queue_item(
+    pool: &PgPool,
+    session_id: Uuid,
+    item_id: Uuid,
+    user_id: Uuid,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO public.party_queue_votes (queue_item_id, user_id)
+        SELECT $1, $2
+        WHERE EXISTS (
+            SELECT 1 FROM public.party_queue_items
+            WHERE id = $1 AND session_id = $3
+        )
+        ON CONFLICT (queue_item_id, user_id) DO NOTHING
+        "#,
+    )
+    .bind(item_id)
+    .bind(user_id)
+    .bind(session_id)
+    .execute(pool)
+    .await
+    .context("adding queue item vote")?;
+    Ok(())
+}
+
+pub async fn unvote_queue_item(
+    pool: &PgPool,
+    session_id: Uuid,
+    item_id: Uuid,
+    user_id: Uuid,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        DELETE FROM public.party_queue_votes
+        WHERE queue_item_id = $1
+          AND user_id = $2
+          AND EXISTS (
+              SELECT 1 FROM public.party_queue_items
+              WHERE id = $1 AND session_id = $3
+          )
+        "#,
+    )
+    .bind(item_id)
+    .bind(user_id)
+    .bind(session_id)
+    .execute(pool)
+    .await
+    .context("removing queue item vote")?;
+    Ok(())
+}
+
+pub async fn votes_for_queue_items(
+    pool: &PgPool,
+    session_id: Uuid,
+) -> anyhow::Result<Vec<PartyQueueVote>> {
+    let votes = sqlx::query_as::<_, PartyQueueVote>(
+        r#"
+        SELECT v.queue_item_id, v.user_id, u.display_name
+        FROM public.party_queue_votes v
+        JOIN public.party_queue_items qi ON qi.id = v.queue_item_id
+        LEFT JOIN public.users u ON u.id = v.user_id
+        WHERE qi.session_id = $1
+        ORDER BY v.created_at ASC
+        "#,
+    )
+    .bind(session_id)
+    .fetch_all(pool)
+    .await
+    .context("fetching votes for queue items")?;
+    Ok(votes)
+}
+
+pub async fn sort_voted_queue(pool: &PgPool, session_id: Uuid) -> anyhow::Result<()> {
+    #[derive(sqlx::FromRow)]
+    struct VoteSortRow {
+        id: Uuid,
+        pin_position: Option<i32>,
+        created_at: DateTime<Utc>,
+        vote_count: Option<i64>,
+    }
+
+    let rows = sqlx::query_as::<_, VoteSortRow>(
+        r#"
+        SELECT qi.id, qi.pin_position, qi.created_at,
+               COUNT(v.id)::bigint AS vote_count
+        FROM public.party_queue_items qi
+        LEFT JOIN public.party_queue_votes v ON v.queue_item_id = qi.id
+        WHERE qi.session_id = $1
+        GROUP BY qi.id, qi.pin_position, qi.created_at
+        "#,
+    )
+    .bind(session_id)
+    .fetch_all(pool)
+    .await
+    .context("fetching items for vote sort")?;
+
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    let n = rows.len();
+
+    let mut pinned: Vec<(i32, Uuid)> = rows
+        .iter()
+        .filter_map(|r| r.pin_position.map(|p| (p, r.id)))
+        .collect();
+    pinned.sort_by_key(|(p, _)| *p);
+
+    let unpinned: Vec<Uuid> = {
+        let mut u: Vec<_> = rows.iter().filter(|r| r.pin_position.is_none()).collect();
+        u.sort_by(|a, b| {
+            let va = a.vote_count.unwrap_or(0);
+            let vb = b.vote_count.unwrap_or(0);
+            vb.cmp(&va).then_with(|| a.created_at.cmp(&b.created_at))
+        });
+        u.into_iter().map(|r| r.id).collect()
+    };
+
+    let mut slots: Vec<Option<Uuid>> = vec![None; n];
+
+    for (pin_pos, id) in &pinned {
+        let target = (*pin_pos as usize).min(n - 1);
+        let actual = (target..n)
+            .find(|&i| slots[i].is_none())
+            .or_else(|| (0..n).find(|&i| slots[i].is_none()));
+        if let Some(idx) = actual {
+            slots[idx] = Some(*id);
+        }
+    }
+
+    let mut unpinned_iter = unpinned.into_iter();
+    for slot in &mut slots {
+        if slot.is_none() {
+            *slot = unpinned_iter.next();
+        }
+    }
+
+    let ordered_ids: Vec<Uuid> = slots.into_iter().flatten().collect();
+    update_queue_positions(pool, session_id, &ordered_ids).await
 }

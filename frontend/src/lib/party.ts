@@ -1,4 +1,4 @@
-import { get, getBlob, post } from './api'
+import { del, get, getBlob, post } from './api'
 import type { PlaybackState, TrackDetails, TrackSearchResult } from './weave'
 
 export interface PartySession {
@@ -14,7 +14,12 @@ export interface PartySession {
   is_host: boolean
 }
 
-export type PartyMode = 'open_queue' | 'shared_queue'
+export type PartyMode = 'open_queue' | 'shared_queue' | 'voted_queue'
+
+export interface PartyVoter {
+  user_id: string
+  display_name: string | null
+}
 
 export interface PartyQueueItem {
   id: string
@@ -24,6 +29,10 @@ export interface PartyQueueItem {
   album_art_url: string | null
   duration_ms: number | null
   position: number
+  pin_position: number | null
+  vote_count: number
+  user_voted: boolean
+  voters: PartyVoter[]
   added_by_user_id: string | null
   added_by_display_name: string | null
 }
@@ -158,6 +167,12 @@ export const reorderPartyQueue = (id: string, item_id: string, to_position: numb
 
 export const removePartyQueueTrack = (id: string, item_id: string) =>
   post<PartyQueueState>(`/party/sessions/${id}/queue/remove`, { item_id })
+
+export const votePartyQueueItem = (id: string, item_id: string, vote: boolean) =>
+  post<PartyQueueState>(`/party/sessions/${id}/queue/${item_id}/vote`, { vote })
+
+export const unpinPartyQueueItem = (id: string, item_id: string) =>
+  del<PartyQueueState>(`/party/sessions/${id}/queue/${item_id}/pin`)
 
 export const getPartyTrack = (uri: string) =>
   get<TrackDetails>(`/party/track/${encodeURIComponent(uri)}`)
