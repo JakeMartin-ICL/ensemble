@@ -72,6 +72,7 @@ export default function QueueList<T extends PositionedItem>({
   const scrollAtStartRef = useRef(0)
   const getKeyRef = useRef(getKey)
   const getColorRef = useRef(getColor)
+  const wasDraggingKeyRef = useRef<string | null>(null)
 
   dragKeyRef.current = dragKey
   getKeyRef.current = getKey
@@ -204,6 +205,7 @@ export default function QueueList<T extends PositionedItem>({
 
   useLayoutEffect(() => {
     if (dragKeyRef.current) {
+      wasDraggingKeyRef.current = dragKeyRef.current
       previousRectsRef.current = snapshotRects()
       previousItemsRef.current = items
       previousKeysRef.current = items.map(getKeyRef.current)
@@ -247,6 +249,7 @@ export default function QueueList<T extends PositionedItem>({
 
     for (const item of items) {
       const key = keyFor(item)
+      if (key === wasDraggingKeyRef.current) continue
       const el = itemElsRef.current.get(key)
       if (!el) continue
 

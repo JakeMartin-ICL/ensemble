@@ -321,9 +321,7 @@ export default function PartySessionPage() {
   function handleReorder(item: PartyQueueItem, toPosition: number) {
     if (!session || !canEditQueue(session)) return
     if (toPosition < 0 || toPosition >= queue.items.length) return
-    if (session.mode !== 'voted_queue') {
-      setQueue(applyMove(queue, item.id, toPosition))
-    }
+    setQueue(applyMove(queue, item.id, toPosition))
     void reorderPartyQueue(session.id, item.id, toPosition)
       .then((q) => { setQueue(filterPendingRemoved(q, pendingRemovedIdsRef.current)) })
       .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
