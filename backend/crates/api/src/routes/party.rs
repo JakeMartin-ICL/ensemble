@@ -1051,12 +1051,14 @@ async fn get_library_tracks(
     let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
     let access_token = get_access_token(&state, user_id).await?;
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
-    let results = user_playlist_tracks(&access_token, limit)
-        .await
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
     let playlists = user_playlists(&access_token)
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
+    let results = if limit == 0 {
+        Vec::new()
+    } else {
+        user_playlist_tracks(&access_token, &playlists, limit).await
+    };
 
     Ok(Json(TrackSearchResponse { results, playlists }))
 }
@@ -1397,7 +1399,8 @@ async fn search_user_playlist_tracks(
     let needle = term.to_lowercase();
     let mut results = Vec::new();
 
-    for track in user_playlist_tracks(access_token, 1_500).await? {
+    let playlists = user_playlists(access_token).await?;
+    for track in user_playlist_tracks(access_token, &playlists, 1_500).await {
         let name = track.name.as_deref().unwrap_or("");
         let artist = track.artist.as_deref().unwrap_or("");
         if !name.to_lowercase().contains(&needle) && !artist.to_lowercase().contains(&needle) {
@@ -1441,9 +1444,9 @@ async fn user_playlists(access_token: &str) -> anyhow::Result<Vec<PlaylistSearch
 
 async fn user_playlist_tracks(
     access_token: &str,
+    playlists: &[PlaylistSearchResultResponse],
     limit: usize,
-) -> anyhow::Result<Vec<TrackSearchResultResponse>> {
-    let playlists = spotify::playlist::get_user_playlists(access_token).await?;
+) -> Vec<TrackSearchResultResponse> {
     let mut results = Vec::new();
 
     for (playlist_index, playlist) in playlists.iter().enumerate() {
@@ -1480,7 +1483,7 @@ async fn user_playlist_tracks(
         }
     }
 
-    Ok(results)
+    results
 }
 
 async fn get_existing_session(

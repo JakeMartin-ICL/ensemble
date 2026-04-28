@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import QueueList from '../../components/QueueList'
 import QueueTrackLabel from '../../components/QueueTrackLabel'
@@ -63,6 +63,7 @@ export default function PartySessionPage() {
   const [libraryTracks, setLibraryTracks] = useState<TrackSearchResult[]>([])
   const [libraryPlaylists, setLibraryPlaylists] = useState<PartyPlaylistSearchResult[]>([])
   const [libraryLoading, setLibraryLoading] = useState(false)
+  const [libraryLoaded, setLibraryLoaded] = useState(false)
   const [now, setNow] = useState(() => Date.now())
   const [copiedCode, setCopiedCode] = useState(false)
   const [modeOpen, setModeOpen] = useState(false)
@@ -79,6 +80,7 @@ export default function PartySessionPage() {
   const [duplicatePulse, setDuplicatePulse] = useState<{ itemId: string; token: number } | null>(null)
   const duplicatePulseTokenRef = useRef(0)
   const pendingRemovedIdsRef = useRef<Set<string>>(new Set())
+  const libraryRequestRef = useRef<Promise<void> | null>(null)
   const modeButtonRef = useRef<HTMLButtonElement | null>(null)
   const modePanelRef = useRef<HTMLDivElement | null>(null)
   const settingsButtonRef = useRef<HTMLButtonElement | null>(null)
@@ -102,19 +104,6 @@ export default function PartySessionPage() {
         setError(e instanceof Error ? e.message : String(e))
       })
   }, [navigate])
-
-  useEffect(() => {
-    if (!session?.id) return
-
-    setLibraryLoading(true)
-    void getPartyLibraryTracks()
-      .then((response) => {
-        setLibraryTracks(response.results)
-        setLibraryPlaylists(response.playlists)
-      })
-      .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
-      .finally(() => { setLibraryLoading(false) })
-  }, [session?.id])
 
   useEffect(() => {
     if (!session?.id) return
@@ -294,6 +283,25 @@ export default function PartySessionPage() {
         if (showLoading) setExportLoading(false)
       })
   }
+
+  const ensureLibraryLoaded = useCallback(() => {
+    if (libraryLoaded || libraryRequestRef.current) {
+      return
+    }
+
+    setLibraryLoading(true)
+    libraryRequestRef.current = getPartyLibraryTracks()
+      .then((response) => {
+        setLibraryTracks(response.results)
+        setLibraryPlaylists(response.playlists)
+        setLibraryLoaded(true)
+      })
+      .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
+      .finally(() => {
+        libraryRequestRef.current = null
+        setLibraryLoading(false)
+      })
+  }, [libraryLoaded])
 
   function handleAdd(item: TrackSearchResult) {
     if (!session) return Promise.resolve()
@@ -696,6 +704,7 @@ export default function PartySessionPage() {
         libraryTracks={libraryTracks}
         libraryPlaylists={libraryPlaylists}
         libraryLoading={libraryLoading}
+        onLoadLibrary={ensureLibraryLoaded}
         onAddTrack={handleAdd}
         onAddPlaylist={handleAddPlaylist}
         onReorder={handleReorder}
@@ -845,6 +854,7 @@ function PartyQueuePanel({
   libraryTracks,
   libraryPlaylists,
   libraryLoading,
+  onLoadLibrary,
   onAddTrack,
   onAddPlaylist,
   onReorder,
@@ -862,6 +872,7 @@ function PartyQueuePanel({
   libraryTracks: TrackSearchResult[]
   libraryPlaylists: PartyPlaylistSearchResult[]
   libraryLoading: boolean
+  onLoadLibrary: () => void
   onAddTrack: (item: TrackSearchResult) => Promise<void>
   onAddPlaylist: (playlist: PartyPlaylistSearchResult) => Promise<void>
   onReorder: (item: PartyQueueItem, toPosition: number) => void
@@ -890,6 +901,7 @@ function PartyQueuePanel({
       return
     }
 
+    onLoadLibrary()
     setSearchingLocal(true)
     setSpotifyResults(null)
     const timer = window.setTimeout(() => {
@@ -899,7 +911,7 @@ function PartyQueuePanel({
     }, 180)
 
     return () => { window.clearTimeout(timer) }
-  }, [canAddPlaylists, libraryPlaylists, libraryTracks, query])
+  }, [canAddPlaylists, libraryPlaylists, libraryTracks, onLoadLibrary, query])
 
   function handleSearchSpotify() {
     const term = query.trim()

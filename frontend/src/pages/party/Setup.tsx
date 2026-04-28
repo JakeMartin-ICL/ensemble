@@ -37,7 +37,7 @@ export default function PartyHome() {
 
   useEffect(() => {
     setLibraryLoading(true)
-    void getPartyLibraryTracks(1)
+    void getPartyLibraryTracks(0)
       .then((response) => { setPlaylists(response.playlists) })
       .catch(() => { setPlaylists([]) })
       .finally(() => { setLibraryLoading(false) })

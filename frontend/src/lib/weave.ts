@@ -1,5 +1,8 @@
 import { get, post } from './api'
 
+const PLAYLIST_CACHE_TTL_MS = 24 * 60 * 60 * 1000
+let playlistsRequest: Promise<Playlist[]> | null = null
+
 export interface Session {
   id: string
   playlists: {
@@ -17,6 +20,11 @@ export interface Playlist {
   name: string
   track_count: number
   image_url: string | null
+}
+
+interface CachedPlaylists {
+  expires_at: number
+  value: Playlist[]
 }
 
 export interface TrackDetails {
@@ -129,8 +137,60 @@ export const reorderPlaylistQueue = (
 export const endSession = (id: string) =>
   post<{ ok: boolean }>(`/weave/sessions/${id}/end`, {})
 
-export const getPlaylists = () =>
-  get<Playlist[]>('/weave/playlists')
+export function getPlaylists(): Promise<Playlist[]> {
+  const cacheKey = weavePlaylistsCacheKey()
+  const cached = readPlaylistsCache(cacheKey)
+  if (cached) return Promise.resolve(cached)
+  if (playlistsRequest) return playlistsRequest
+
+  playlistsRequest = get<Playlist[]>('/weave/playlists')
+    .then((playlists) => {
+      writePlaylistsCache(cacheKey, playlists)
+      return playlists
+    })
+    .finally(() => { playlistsRequest = null })
+
+  return playlistsRequest
+}
 
 export const getTrack = (uri: string) =>
   get<TrackDetails>(`/weave/track/${encodeURIComponent(uri)}`)
+
+function weavePlaylistsCacheKey(): string {
+  const userId = localStorage.getItem('user_id') ?? 'anonymous'
+  return `weave_playlists:${userId}`
+}
+
+function readPlaylistsCache(key: string): Playlist[] | null {
+  try {
+    const raw = localStorage.getItem(key)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as unknown
+    if (!isCachedPlaylists(parsed)) return null
+    if (parsed.expires_at <= Date.now()) {
+      localStorage.removeItem(key)
+      return null
+    }
+    return parsed.value
+  } catch {
+    return null
+  }
+}
+
+function writePlaylistsCache(key: string, value: Playlist[]): void {
+  try {
+    const cached: CachedPlaylists = {
+      expires_at: Date.now() + PLAYLIST_CACHE_TTL_MS,
+      value,
+    }
+    localStorage.setItem(key, JSON.stringify(cached))
+  } catch {
+    // Cache storage is best-effort; the app can always fetch fresh data.
+  }
+}
+
+function isCachedPlaylists(value: unknown): value is CachedPlaylists {
+  if (typeof value !== 'object' || value === null) return false
+  const candidate = value as { expires_at?: unknown; value?: unknown }
+  return typeof candidate.expires_at === 'number' && Array.isArray(candidate.value)
+}

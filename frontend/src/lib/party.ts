@@ -1,6 +1,9 @@
 import { del, get, getBlob, post } from './api'
 import type { PlaybackState, TrackDetails, TrackSearchResult } from './weave'
 
+const LIBRARY_CACHE_TTL_MS = 24 * 60 * 60 * 1000
+const libraryRequests = new Map<string, Promise<PartySearchResponse>>()
+
 export interface PartySession {
   id: string
   host_user_id: string
@@ -92,6 +95,11 @@ export interface PartyPlaylistSearchResult {
   image_url: string | null
 }
 
+interface CachedPartySearchResponse {
+  expires_at: number
+  value: PartySearchResponse
+}
+
 export const getActivePartySession = () =>
   get<PartySession | null>('/party/sessions/active')
 
@@ -153,8 +161,24 @@ export const setPartySourceQueueItemDisabled = (id: string, item_id: string, dis
 export const searchPartyTracks = (id: string, q: string, scope: 'local' | 'spotify') =>
   get<PartySearchResponse>(`/party/sessions/${id}/queue/search?q=${encodeURIComponent(q)}&scope=${scope}`)
 
-export const getPartyLibraryTracks = (limit = 1500) =>
-  get<PartySearchResponse>(`/party/library/tracks?limit=${limit.toString()}`)
+export function getPartyLibraryTracks(limit = 1500): Promise<PartySearchResponse> {
+  const cacheKey = partyLibraryCacheKey(limit)
+  const cached = readPartyLibraryCache(cacheKey)
+  if (cached) return Promise.resolve(cached)
+
+  const inFlight = libraryRequests.get(cacheKey)
+  if (inFlight) return inFlight
+
+  const request = get<PartySearchResponse>(`/party/library/tracks?limit=${limit.toString()}`)
+    .then((response) => {
+      writePartyLibraryCache(cacheKey, response)
+      return response
+    })
+    .finally(() => { libraryRequests.delete(cacheKey) })
+
+  libraryRequests.set(cacheKey, request)
+  return request
+}
 
 export const addPartyQueueTrack = (id: string, track: TrackSearchResult) =>
   post<PartyQueueState>(`/party/sessions/${id}/queue/add`, { track })
@@ -185,3 +209,44 @@ export const exportPartyPlaylist = (id: string, mode: PartyExportMode, name?: st
 
 export const getPartyExportCsv = (id: string, mode: PartyExportMode) =>
   getBlob(`/party/sessions/${id}/export/csv?mode=${mode}`)
+
+function partyLibraryCacheKey(limit: number): string {
+  const userId = localStorage.getItem('user_id') ?? 'anonymous'
+  return `party_library:${userId}:${limit.toString()}`
+}
+
+function readPartyLibraryCache(key: string): PartySearchResponse | null {
+  try {
+    const raw = localStorage.getItem(key)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as unknown
+    if (!isCachedPartySearchResponse(parsed)) return null
+    if (parsed.expires_at <= Date.now()) {
+      localStorage.removeItem(key)
+      return null
+    }
+    return parsed.value
+  } catch {
+    return null
+  }
+}
+
+function writePartyLibraryCache(key: string, value: PartySearchResponse): void {
+  try {
+    const cached: CachedPartySearchResponse = {
+      expires_at: Date.now() + LIBRARY_CACHE_TTL_MS,
+      value,
+    }
+    localStorage.setItem(key, JSON.stringify(cached))
+  } catch {
+    // Cache storage is best-effort; the app can always fetch fresh data.
+  }
+}
+
+function isCachedPartySearchResponse(value: unknown): value is CachedPartySearchResponse {
+  if (typeof value !== 'object' || value === null) return false
+  const candidate = value as { expires_at?: unknown; value?: unknown }
+  return typeof candidate.expires_at === 'number'
+    && typeof candidate.value === 'object'
+    && candidate.value !== null
+}

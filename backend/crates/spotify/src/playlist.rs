@@ -1,6 +1,49 @@
 //! Fetch playlist tracks and user playlists from Spotify.
 
 use anyhow::Context;
+use reqwest::{header, Response, StatusCode};
+use std::fmt;
+
+#[derive(Debug)]
+struct SpotifyApiError {
+    operation: &'static str,
+    status: StatusCode,
+    retry_after: Option<String>,
+    body: String,
+}
+
+impl fmt::Display for SpotifyApiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Spotify {} returned {}", self.operation, self.status)?;
+        if let Some(retry_after) = &self.retry_after {
+            write!(f, " (retry after {retry_after})")?;
+        }
+        if !self.body.is_empty() {
+            write!(f, ": {}", self.body)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for SpotifyApiError {}
+
+async fn spotify_error(operation: &'static str, resp: Response) -> anyhow::Error {
+    let status = resp.status();
+    let retry_after = resp
+        .headers()
+        .get(header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned);
+    let body = resp.text().await.unwrap_or_default();
+
+    SpotifyApiError {
+        operation,
+        status,
+        retry_after,
+        body,
+    }
+    .into()
+}
 
 pub struct PlaylistSummary {
     pub id: String,
@@ -123,9 +166,7 @@ pub async fn get_tracks(
         let resp = req.send().await.context("fetching playlist tracks")?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Spotify playlist tracks returned {status}: {body}");
+            return Err(spotify_error("playlist tracks", resp).await);
         }
 
         let page = resp
@@ -204,9 +245,7 @@ pub async fn create_playlist(
         .context("creating Spotify playlist")?;
 
     if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("Spotify create playlist returned {status}: {body}");
+        return Err(spotify_error("create playlist", resp).await);
     }
 
     let playlist = resp
@@ -238,9 +277,7 @@ pub async fn add_items_to_playlist(
             .context("adding Spotify playlist items")?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Spotify add playlist items returned {status}: {body}");
+            return Err(spotify_error("add playlist items", resp).await);
         }
     }
 
@@ -293,14 +330,18 @@ pub async fn get_user_playlists(access_token: &str) -> anyhow::Result<Vec<Playli
     let mut url = Some("https://api.spotify.com/v1/me/playlists?limit=50".to_string());
 
     while let Some(next_url) = url {
-        let page = client
+        let resp = client
             .get(&next_url)
             .bearer_auth(access_token)
             .send()
             .await
-            .context("fetching user playlists")?
-            .error_for_status()
-            .context("Spotify /v1/me/playlists returned error")?
+            .context("fetching user playlists")?;
+
+        if !resp.status().is_success() {
+            return Err(spotify_error("user playlists", resp).await);
+        }
+
+        let page = resp
             .json::<RawPlaylistsPage>()
             .await
             .context("parsing playlists response")?;
@@ -348,9 +389,7 @@ pub async fn search_tracks(
         .context("searching Spotify tracks")?;
 
     if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("Spotify track search returned {status}: {body}");
+        return Err(spotify_error("track search", resp).await);
     }
 
     let raw = resp
