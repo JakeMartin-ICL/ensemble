@@ -956,6 +956,79 @@ function SourceQueuePanel({
   sourceQueue: PartySourceQueueState
   onHide: () => void
 }) {
+  const itemElsRef = useRef<Map<string, HTMLDivElement>>(new Map())
+  const previousRectsRef = useRef<Map<string, DOMRect>>(new Map())
+  const previousItemsRef = useRef<PartySourceQueueState['items']>([])
+  const previousIdsRef = useRef<string[]>([])
+  const [exitItems, setExitItems] = useState<{ item: PartySourceQueueState['items'][number]; rect: DOMRect }[]>([])
+
+  useLayoutEffect(() => {
+    const previousRects = previousRectsRef.current
+    const previousItems = previousItemsRef.current
+    const orderedIds = sourceQueue.items.map((item) => item.id)
+    const currentIds = new Set(orderedIds)
+    const itemOrderChanged =
+      orderedIds.length !== previousIdsRef.current.length
+      || orderedIds.some((id, index) => id !== previousIdsRef.current[index])
+
+    if (!itemOrderChanged) {
+      previousRectsRef.current = snapshotSourceRects(itemElsRef.current)
+      previousItemsRef.current = sourceQueue.items
+      previousIdsRef.current = orderedIds
+      return
+    }
+
+    const removedItems = previousItems
+      .map((item) => {
+        const rect = previousRects.get(item.id)
+        if (currentIds.has(item.id) || !rect) return null
+        return { item, rect }
+      })
+      .filter((item): item is { item: PartySourceQueueState['items'][number]; rect: DOMRect } => item !== null)
+
+    if (removedItems.length > 0) {
+      setExitItems((current) => [...current, ...removedItems])
+    }
+
+    for (const item of sourceQueue.items) {
+      const el = itemElsRef.current.get(item.id)
+      if (!el) continue
+
+      const newRect = el.getBoundingClientRect()
+      const oldRect = previousRects.get(item.id)
+      if (oldRect) {
+        const deltaY = oldRect.top - newRect.top
+        if (Math.abs(deltaY) > 1) {
+          el.animate(
+            [
+              { transform: `translateY(${deltaY.toString()}px)` },
+              { transform: 'translateY(0)' },
+            ],
+            {
+              duration: 240,
+              easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)',
+            },
+          )
+        }
+      } else {
+        el.animate(
+          [
+            { opacity: 0, transform: 'translateY(10px) scale(0.98)' },
+            { opacity: 1, transform: 'translateY(0) scale(1)' },
+          ],
+          {
+            duration: 220,
+            easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)',
+          },
+        )
+      }
+    }
+
+    previousRectsRef.current = snapshotSourceRects(itemElsRef.current)
+    previousItemsRef.current = sourceQueue.items
+    previousIdsRef.current = orderedIds
+  }, [sourceQueue.items])
+
   return (
     <section className={styles.queuePanel}>
       <div className={styles.sourceQueueHeader}>
@@ -969,7 +1042,14 @@ function SourceQueuePanel({
       ) : (
         <div className={styles.sourceQueueList}>
           {sourceQueue.items.map((item) => (
-            <div key={item.id} className={styles.sourceQueueItem}>
+            <div
+              key={item.id}
+              ref={(el) => {
+                if (el) itemElsRef.current.set(item.id, el)
+                else itemElsRef.current.delete(item.id)
+              }}
+              className={styles.sourceQueueItem}
+            >
               {item.album_art_url
                 ? <img className={styles.queueSearchArt} src={item.album_art_url} alt="" />
                 : <div className={styles.queueSearchArt} />
@@ -983,8 +1063,40 @@ function SourceQueuePanel({
           ))}
         </div>
       )}
+      {exitItems.map(({ item, rect }) => (
+        <div
+          key={item.id}
+          className={`${styles.sourceQueueItem} ${styles.queueExitItem}`}
+          style={{
+            top: rect.top,
+            left: rect.left,
+            width: rect.width,
+          }}
+          onAnimationEnd={() => {
+            setExitItems((current) => current.filter((exitItem) => exitItem.item.id !== item.id))
+          }}
+        >
+          {item.album_art_url
+            ? <img className={styles.queueSearchArt} src={item.album_art_url} alt="" />
+            : <div className={styles.queueSearchArt} />
+          }
+          <span className={styles.queueTrackText}>
+            <span className={styles.queueTrackName}>{item.name ?? item.uri}</span>
+            {item.artist && <span className={styles.queueArtistName}>{item.artist}</span>}
+          </span>
+          {item.deferred && <span className={styles.turnBadge}>Later</span>}
+        </div>
+      ))}
     </section>
   )
+}
+
+function snapshotSourceRects(elements: Map<string, HTMLElement>): Map<string, DOMRect> {
+  const rects = new Map<string, DOMRect>()
+  for (const [key, el] of elements) {
+    rects.set(key, el.getBoundingClientRect())
+  }
+  return rects
 }
 
 function IconSvg({ children }: { children: React.ReactNode }) {

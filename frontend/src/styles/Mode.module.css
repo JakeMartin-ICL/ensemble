@@ -1092,6 +1092,15 @@
   transition: opacity 0.15s ease;
 }
 
+.queueExitItem {
+  position: fixed;
+  z-index: 40;
+  pointer-events: none;
+  cursor: default;
+  box-sizing: border-box;
+  animation: queueItemExit 0.22s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
 .queueTrackText {
   display: flex;
   flex-direction: column;
@@ -1121,6 +1130,24 @@
   border: 1px solid var(--border-subtle);
   border-radius: 10px;
   background: var(--surface-2);
+}
+
+@keyframes queueItemExit {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+
+  to {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.97);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .queueExitItem {
+    animation-duration: 0.01ms;
+  }
 }
 
 .queueTrackName,

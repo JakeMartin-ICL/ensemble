@@ -1,8 +1,15 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import styles from '../styles/Mode.module.css'
 
 interface PositionedItem {
   position: number
+}
+
+interface ExitItem<T> {
+  key: string
+  item: T
+  rect: DOMRect
+  color: string
 }
 
 export default function QueueList<T extends PositionedItem>({
@@ -34,6 +41,7 @@ export default function QueueList<T extends PositionedItem>({
   const [dragDelta, setDragDelta] = useState(0)
   const [insertIdx, setInsertIdx] = useState(0)
   const [removeHot, setRemoveHot] = useState(false)
+  const [exitItems, setExitItems] = useState<ExitItem<T>[]>([])
 
   const itemElsRef = useRef<Map<string, HTMLElement>>(new Map())
   const removeZoneRef = useRef<HTMLDivElement | null>(null)
@@ -48,9 +56,16 @@ export default function QueueList<T extends PositionedItem>({
   const lastYRef = useRef(0)
   const movedRef = useRef(false)
   const originalRectsRef = useRef<Map<string, DOMRect>>(new Map())
+  const previousRectsRef = useRef<Map<string, DOMRect>>(new Map())
+  const previousItemsRef = useRef<T[]>([])
+  const previousKeysRef = useRef<string[]>([])
   const scrollAtStartRef = useRef(0)
+  const getKeyRef = useRef(getKey)
+  const getColorRef = useRef(getColor)
 
   dragKeyRef.current = dragKey
+  getKeyRef.current = getKey
+  getColorRef.current = getColor
 
   function partnersFor(draggedItem: T): T[] {
     const draggedKey = getKey(draggedItem)
@@ -142,6 +157,99 @@ export default function QueueList<T extends PositionedItem>({
   }
 
   useEffect(() => resetDrag, [])
+
+  useLayoutEffect(() => {
+    if (dragKeyRef.current) {
+      previousRectsRef.current = snapshotRects()
+      previousItemsRef.current = items
+      previousKeysRef.current = items.map(getKeyRef.current)
+      return
+    }
+
+    const previousRects = previousRectsRef.current
+    const previousItems = previousItemsRef.current
+    const keyFor = getKeyRef.current
+    const colorFor = getColorRef.current
+    const orderedKeys = items.map(keyFor)
+    const currentKeys = new Set(orderedKeys)
+    const keyOrderChanged =
+      orderedKeys.length !== previousKeysRef.current.length
+      || orderedKeys.some((key, index) => key !== previousKeysRef.current[index])
+
+    if (!keyOrderChanged) {
+      previousRectsRef.current = snapshotRects()
+      previousItemsRef.current = items
+      previousKeysRef.current = orderedKeys
+      return
+    }
+
+    const removedItems = previousItems
+      .map((item) => {
+        const key = keyFor(item)
+        const rect = previousRects.get(key)
+        if (currentKeys.has(key) || !rect) return null
+        return {
+          key,
+          item,
+          rect,
+          color: colorFor?.(item) ?? 'var(--border-subtle)',
+        }
+      })
+      .filter((item): item is ExitItem<T> => item !== null)
+
+    if (removedItems.length > 0) {
+      setExitItems((current) => [...current, ...removedItems])
+    }
+
+    for (const item of items) {
+      const key = keyFor(item)
+      const el = itemElsRef.current.get(key)
+      if (!el) continue
+
+      const newRect = el.getBoundingClientRect()
+      const oldRect = previousRects.get(key)
+      if (oldRect) {
+        const deltaY = oldRect.top - newRect.top
+        if (Math.abs(deltaY) > 1) {
+          el.getAnimations().forEach((animation) => { animation.cancel() })
+          el.animate(
+            [
+              { transform: `translateY(${deltaY.toString()}px)` },
+              { transform: 'translateY(0)' },
+            ],
+            {
+              duration: 240,
+              easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)',
+            },
+          )
+        }
+      } else {
+        el.getAnimations().forEach((animation) => { animation.cancel() })
+        el.animate(
+          [
+            { opacity: 0, transform: 'translateY(10px) scale(0.98)' },
+            { opacity: 1, transform: 'translateY(0) scale(1)' },
+          ],
+          {
+            duration: 220,
+            easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)',
+          },
+        )
+      }
+    }
+
+    previousRectsRef.current = snapshotRects()
+    previousItemsRef.current = items
+    previousKeysRef.current = orderedKeys
+  }, [items])
+
+  function snapshotRects(): Map<string, DOMRect> {
+    const rects = new Map<string, DOMRect>()
+    for (const [key, el] of itemElsRef.current) {
+      rects.set(key, el.getBoundingClientRect())
+    }
+    return rects
+  }
 
   function activate(el: HTMLElement, item: T, pointerId: number) {
     if (!canReorder) return
@@ -295,6 +403,24 @@ export default function QueueList<T extends PositionedItem>({
           )
         })}
       </ol>
+      {exitItems.map((exitItem) => (
+        <div
+          key={exitItem.key}
+          className={`${styles.queueItem} ${styles.queueExitItem}`}
+          style={{
+            '--item-color': exitItem.color,
+            top: exitItem.rect.top,
+            left: exitItem.rect.left,
+            width: exitItem.rect.width,
+          } as React.CSSProperties}
+          onAnimationEnd={() => {
+            setExitItems((current) => current.filter((item) => item.key !== exitItem.key))
+          }}
+        >
+          {renderItem(exitItem.item)}
+          {renderActions?.(exitItem.item)}
+        </div>
+      ))}
       {dragKey && onRemoveDrop && (
         <div
           ref={removeZoneRef}
