@@ -87,6 +87,7 @@ struct SessionResponse {
     allow_guest_playlist_adds: bool,
     source_min_queue_size: i32,
     add_added_tracks_to_source: bool,
+    show_queue_attribution: bool,
     current_track_uri: Option<String>,
     is_host: bool,
 }
@@ -131,6 +132,7 @@ struct QueueItemResponse {
     duration_ms: Option<u64>,
     position: usize,
     added_by_user_id: Option<Uuid>,
+    added_by_display_name: Option<String>,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -143,6 +145,8 @@ struct SourceQueueItemResponse {
     duration_ms: Option<u64>,
     position: usize,
     deferred: bool,
+    added_by_user_id: Option<Uuid>,
+    added_by_display_name: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -222,6 +226,7 @@ struct UpdateSettingsBody {
     allow_guest_playlist_adds: Option<bool>,
     source_min_queue_size: Option<i32>,
     add_added_tracks_to_source: Option<bool>,
+    show_queue_attribution: Option<bool>,
 }
 
 #[derive(serde::Serialize)]
@@ -541,6 +546,11 @@ async fn update_settings(
             .await
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
+    if let Some(show_queue_attribution) = body.show_queue_attribution {
+        db::party::set_show_queue_attribution(&state.pool, session_id, show_queue_attribution)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    }
 
     let updated = get_existing_session(&state, session_id).await?;
     Ok(Json(session_response(updated, user_id)))
@@ -823,6 +833,7 @@ async fn build_queue_response(
             duration_ms: item.track.duration_ms,
             position,
             added_by_user_id: item.added_by_user_id,
+            added_by_display_name: item.added_by_display_name,
         })
         .collect();
 
@@ -847,6 +858,8 @@ async fn build_source_queue_response(
             duration_ms: item.track.duration_ms,
             position,
             deferred: item.position < 0,
+            added_by_user_id: item.added_by_user_id,
+            added_by_display_name: item.added_by_display_name,
         })
         .collect();
 
@@ -1041,6 +1054,7 @@ fn session_response(session: db::party::PartySession, user_id: Uuid) -> SessionR
         allow_guest_playlist_adds: session.allow_guest_playlist_adds,
         source_min_queue_size: session.source_min_queue_size,
         add_added_tracks_to_source: session.add_added_tracks_to_source,
+        show_queue_attribution: session.show_queue_attribution,
         current_track_uri: session.current_track_uri,
         is_host,
     }

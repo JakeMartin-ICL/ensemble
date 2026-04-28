@@ -9,6 +9,7 @@ export interface PartySession {
   allow_guest_playlist_adds: boolean
   source_min_queue_size: number
   add_added_tracks_to_source: boolean
+  show_queue_attribution: boolean
   current_track_uri: string | null
   is_host: boolean
 }
@@ -24,6 +25,7 @@ export interface PartyQueueItem {
   duration_ms: number | null
   position: number
   added_by_user_id: string | null
+  added_by_display_name: string | null
 }
 
 export interface PartyQueueState {
@@ -43,6 +45,8 @@ export interface PartySourceQueueItem {
   duration_ms: number | null
   position: number
   deferred: boolean
+  added_by_user_id: string | null
+  added_by_display_name: string | null
 }
 
 export interface PartySearchResponse {
@@ -97,6 +101,7 @@ export interface UpdatePartySettingsOptions {
   allow_guest_playlist_adds?: boolean
   source_min_queue_size?: number
   add_added_tracks_to_source?: boolean
+  show_queue_attribution?: boolean
 }
 
 export const updatePartySettings = (id: string, options: UpdatePartySettingsOptions) =>

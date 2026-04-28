@@ -86,7 +86,7 @@ pub async fn get_tracks(
                 ("market", "from_token"),
                 (
                     "fields",
-                    "items(is_local,item(uri,type,name,artists(name),album(images(url)),duration_ms,is_playable,restrictions(reason))),next",
+                    "items(is_local,item(uri,type,name,artists(name),album(images(url,width,height)),duration_ms,is_playable,restrictions(reason))),next",
                 ),
             ]);
             first_page = false;
@@ -141,8 +141,7 @@ pub async fn get_tracks(
                             .join(", "),
                         album_art_url: item
                             .album
-                            .and_then(|a| a.images.into_iter().next())
-                            .map(|i| i.url),
+                            .and_then(|a| image_url_for_size(a.images, 128)),
                         duration_ms: item.duration_ms.unwrap_or(0),
                     });
                 }
@@ -183,6 +182,22 @@ struct RawCollectionMeta {
 #[derive(serde::Deserialize)]
 struct RawImage {
     url: String,
+    width: Option<u32>,
+    height: Option<u32>,
+}
+
+fn image_url_for_size(images: Vec<RawImage>, target_px: u32) -> Option<String> {
+    images
+        .into_iter()
+        .min_by_key(|image| {
+            let size = image.width.or(image.height).unwrap_or(u32::MAX);
+            if size >= target_px {
+                (0, size - target_px)
+            } else {
+                (1, target_px - size)
+            }
+        })
+        .map(|image| image.url)
 }
 
 pub async fn get_user_playlists(access_token: &str) -> anyhow::Result<Vec<PlaylistSummary>> {
@@ -275,8 +290,7 @@ pub async fn search_tracks(
                     .join(", "),
                 album_art_url: item
                     .album
-                    .and_then(|a| a.images.into_iter().next())
-                    .map(|i| i.url),
+                    .and_then(|a| image_url_for_size(a.images, 128)),
                 duration_ms: item.duration_ms.unwrap_or(0),
             })
         })

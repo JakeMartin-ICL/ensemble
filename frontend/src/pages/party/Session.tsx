@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import QueueList from '../../components/QueueList'
+import QueueTrackLabel from '../../components/QueueTrackLabel'
 import { supabase } from '../../lib/supabase'
 import {
   type PartyMode,
@@ -55,6 +56,7 @@ export default function PartySessionPage() {
   const [savingMode, setSavingMode] = useState<PartyMode | null>(null)
   const [savingGuestPlaylists, setSavingGuestPlaylists] = useState(false)
   const [savingSourceSettings, setSavingSourceSettings] = useState(false)
+  const [savingAttribution, setSavingAttribution] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [duplicatePulse, setDuplicatePulse] = useState<{ itemId: string; token: number } | null>(null)
   const duplicatePulseTokenRef = useRef(0)
@@ -348,6 +350,15 @@ export default function PartySessionPage() {
       .finally(() => { setSavingSourceSettings(false) })
   }
 
+  function handleAttributionChange(showQueueAttribution: boolean) {
+    if (!session?.is_host || savingAttribution) return
+    setSavingAttribution(true)
+    void updatePartySettings(session.id, { show_queue_attribution: showQueueAttribution })
+      .then((s) => { setSession(applyDevGuestOverride(s)) })
+      .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
+      .finally(() => { setSavingAttribution(false) })
+  }
+
   function handleToggleSourceQueue() {
     if (!session?.is_host) return
     const nextOpen = !sourceQueueOpen
@@ -447,13 +458,16 @@ export default function PartySessionPage() {
                   allowGuestPlaylistAdds={session.allow_guest_playlist_adds}
                   sourceMinQueueSize={session.source_min_queue_size}
                   addAddedTracksToSource={session.add_added_tracks_to_source}
+                  showQueueAttribution={session.show_queue_attribution}
                   closing={!settingsOpen}
                   savingMode={savingMode}
                   savingGuestPlaylists={savingGuestPlaylists}
                   savingSourceSettings={savingSourceSettings}
+                  savingAttribution={savingAttribution}
                   onModeChange={handleModeChange}
                   onGuestPlaylistAddsChange={handleGuestPlaylistAddsChange}
                   onSourceSettingsChange={handleSourceSettingsChange}
+                  onAttributionChange={handleAttributionChange}
                 />
               )}
             </div>
@@ -496,6 +510,7 @@ export default function PartySessionPage() {
       <PartyQueuePanel
         sessionId={session.id}
         queue={queue}
+        showAttribution={session.show_queue_attribution}
         canEditQueue={canEditQueue(session)}
         canAddPlaylists={canAddPlaylists(session)}
         duplicatePulse={duplicatePulse}
@@ -509,7 +524,11 @@ export default function PartySessionPage() {
       />
 
       {sourceQueueOpen && sourceQueue && (
-        <SourceQueuePanel sourceQueue={sourceQueue} onHide={handleToggleSourceQueue} />
+        <SourceQueuePanel
+          sourceQueue={sourceQueue}
+          showAttribution={session.show_queue_attribution}
+          onHide={handleToggleSourceQueue}
+        />
       )}
 
       {session.is_host ? (
@@ -545,6 +564,7 @@ function applyDevGuestOverride(session: PartySession): PartySession {
 function PartyQueuePanel({
   sessionId,
   queue,
+  showAttribution,
   canEditQueue,
   canAddPlaylists,
   duplicatePulse,
@@ -558,6 +578,7 @@ function PartyQueuePanel({
 }: {
   sessionId: string
   queue: PartyQueueState
+  showAttribution: boolean
   canEditQueue: boolean
   canAddPlaylists: boolean
   duplicatePulse: { itemId: string; token: number } | null
@@ -846,14 +867,10 @@ function PartyQueuePanel({
           onTopDrop={canEditQueue ? (item) => { onReorder(item, 0) } : undefined}
           onRemoveDrop={canEditQueue ? onRemove : undefined}
           removeDropLabel="Remove"
-          renderItem={(item) => (
-            <>
-              <span className={styles.queueTrackText}>
-                <span className={styles.queueTrackName}>{item.name ?? item.uri}</span>
-                {item.artist && <span className={styles.queueArtistName}>{item.artist}</span>}
-              </span>
-            </>
+          renderActions={(item) => (
+            showAttribution ? <AttributionBadge name={item.added_by_display_name} /> : null
           )}
+          renderItem={(item) => <QueueTrackLabel item={item} />}
         />
       )}
     </section>
@@ -865,25 +882,31 @@ function PartySettingsPanel({
   allowGuestPlaylistAdds,
   sourceMinQueueSize,
   addAddedTracksToSource,
+  showQueueAttribution,
   closing,
   savingMode,
   savingGuestPlaylists,
   savingSourceSettings,
+  savingAttribution,
   onModeChange,
   onGuestPlaylistAddsChange,
   onSourceSettingsChange,
+  onAttributionChange,
 }: {
   mode: PartyMode
   allowGuestPlaylistAdds: boolean
   sourceMinQueueSize: number
   addAddedTracksToSource: boolean
+  showQueueAttribution: boolean
   closing: boolean
   savingMode: PartyMode | null
   savingGuestPlaylists: boolean
   savingSourceSettings: boolean
+  savingAttribution: boolean
   onModeChange: (mode: PartyMode) => void
   onGuestPlaylistAddsChange: (allowGuestPlaylistAdds: boolean) => void
   onSourceSettingsChange: (sourceMinQueueSize: number, addAddedTracksToSource: boolean) => void
+  onAttributionChange: (showQueueAttribution: boolean) => void
 }) {
   return (
     <div className={`${styles.partySettingsPanel}${closing ? ` ${styles.partySettingsPanelClosing}` : ''}`}>
@@ -960,15 +983,30 @@ function PartySettingsPanel({
           <span className={styles.partyModeMeta}>Added songs return after the source cycle.</span>
         </span>
       </button>
+      <button
+        className={`${styles.partyModeOption} ${styles.partySettingOption}${showQueueAttribution ? ` ${styles.partyModeOptionActive}` : ''}`}
+        onClick={() => { onAttributionChange(!showQueueAttribution) }}
+        disabled={savingAttribution}
+        type="button"
+        aria-pressed={showQueueAttribution}
+      >
+        <span className={styles.partyModeIcon}><PersonIcon /></span>
+        <span>
+          <span className={styles.partyModeTitle}>Added by</span>
+          <span className={styles.partyModeMeta}>Show who added each queued song.</span>
+        </span>
+      </button>
     </div>
   )
 }
 
 function SourceQueuePanel({
   sourceQueue,
+  showAttribution,
   onHide,
 }: {
   sourceQueue: PartySourceQueueState
+  showAttribution: boolean
   onHide: () => void
 }) {
   const itemElsRef = useRef<Map<string, HTMLDivElement>>(new Map())
@@ -1065,15 +1103,11 @@ function SourceQueuePanel({
               }}
               className={styles.sourceQueueItem}
             >
-              {item.album_art_url
-                ? <img className={styles.queueSearchArt} src={item.album_art_url} alt="" />
-                : <div className={styles.queueSearchArt} />
-              }
-              <span className={styles.queueTrackText}>
-                <span className={styles.queueTrackName}>{item.name ?? item.uri}</span>
-                {item.artist && <span className={styles.queueArtistName}>{item.artist}</span>}
+              <QueueTrackLabel item={item} />
+              <span className={styles.sourceQueueMeta}>
+                {showAttribution && <AttributionBadge name={item.added_by_display_name} />}
+                {item.deferred && <span className={styles.turnBadge}>Later</span>}
               </span>
-              {item.deferred && <span className={styles.turnBadge}>Later</span>}
             </div>
           ))}
         </div>
@@ -1091,15 +1125,11 @@ function SourceQueuePanel({
             setExitItems((current) => current.filter((exitItem) => exitItem.item.id !== item.id))
           }}
         >
-          {item.album_art_url
-            ? <img className={styles.queueSearchArt} src={item.album_art_url} alt="" />
-            : <div className={styles.queueSearchArt} />
-          }
-          <span className={styles.queueTrackText}>
-            <span className={styles.queueTrackName}>{item.name ?? item.uri}</span>
-            {item.artist && <span className={styles.queueArtistName}>{item.artist}</span>}
+          <QueueTrackLabel item={item} />
+          <span className={styles.sourceQueueMeta}>
+            {showAttribution && <AttributionBadge name={item.added_by_display_name} />}
+            {item.deferred && <span className={styles.turnBadge}>Later</span>}
           </span>
-          {item.deferred && <span className={styles.turnBadge}>Later</span>}
         </div>
       ))}
     </section>
@@ -1112,6 +1142,61 @@ function snapshotSourceRects(elements: Map<string, HTMLElement>): Map<string, DO
     rects.set(key, el.getBoundingClientRect())
   }
   return rects
+}
+
+function AttributionBadge({ name }: { name: string | null }) {
+  const label = name ?? 'Unknown'
+  const [open, setOpen] = useState(false)
+  const [closing, setClosing] = useState(false)
+  const timeoutRef = useRef<number | null>(null)
+  const closeTimeoutRef = useRef<number | null>(null)
+
+  function showBubble() {
+    setOpen(true)
+    setClosing(false)
+    if (timeoutRef.current !== null) window.clearTimeout(timeoutRef.current)
+    if (closeTimeoutRef.current !== null) window.clearTimeout(closeTimeoutRef.current)
+    timeoutRef.current = window.setTimeout(hideBubble, 1800)
+  }
+
+  function hideBubble() {
+    if (!open || closing) return
+    setClosing(true)
+    if (timeoutRef.current !== null) window.clearTimeout(timeoutRef.current)
+    closeTimeoutRef.current = window.setTimeout(() => {
+      setOpen(false)
+      setClosing(false)
+    }, 160)
+  }
+
+  useEffect(() => () => {
+    if (timeoutRef.current !== null) window.clearTimeout(timeoutRef.current)
+    if (closeTimeoutRef.current !== null) window.clearTimeout(closeTimeoutRef.current)
+  }, [])
+
+  return (
+    <button
+      className={styles.queueAttributionBadge}
+      onClick={showBubble}
+      onFocus={showBubble}
+      onBlur={hideBubble}
+      title={label}
+      aria-label={label}
+      type="button"
+    >
+      {initials(label)}
+      {open && (
+        <span
+          className={[
+            styles.queueAttributionBubble,
+            closing ? styles.queueAttributionBubbleClosing : '',
+          ].filter(Boolean).join(' ')}
+        >
+          {label}
+        </span>
+      )}
+    </button>
+  )
 }
 
 function IconSvg({ children }: { children: React.ReactNode }) {
@@ -1194,6 +1279,14 @@ function PlaylistIcon() {
   )
 }
 
+function PersonIcon() {
+  return (
+    <IconSvg>
+      <path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm-7 8a7 7 0 0 1 14 0v1H5v-1Z" />
+    </IconSvg>
+  )
+}
+
 function applyMove(queue: PartyQueueState, itemId: string, toPosition: number): PartyQueueState {
   const items = [...queue.items]
   const fromPosition = items.findIndex((item) => item.id === itemId)
@@ -1270,6 +1363,20 @@ function formatTime(ms: number): string {
   const minutes = Math.floor(totalSeconds / 60)
   const seconds = totalSeconds % 60
   return `${minutes.toString()}:${seconds.toString().padStart(2, '0')}`
+}
+
+function initials(name: string): string {
+  const parts = name
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+
+  if (parts.length === 0) return '?'
+  if (parts.length === 1) {
+    const [first = '', second = ''] = Array.from(parts[0])
+    return `${first.toUpperCase()}${second.toLowerCase()}`
+  }
+  return `${parts[0][0]}${parts[parts.length - 1][0]}`.toUpperCase()
 }
 
 function canEditQueue(session: PartySession): boolean {

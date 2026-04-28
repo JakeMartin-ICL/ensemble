@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import QueueList from '../../components/QueueList'
+import QueueTrackLabel from '../../components/QueueTrackLabel'
 import { supabase } from '../../lib/supabase'
 import {
   type PlaybackState,
@@ -664,7 +665,7 @@ function QueuePanel({
           getKey={(item) => `${item.playlist_id}:${item.position.toString()}`}
           getGroupKey={(item) => item.playlist_id}
           getColor={(item) => playlistColors.get(item.playlist_id) ?? '#c084fc'}
-          renderItem={(item) => <TrackLabel item={item} />}
+          renderItem={(item) => <QueueTrackLabel item={item} />}
           reorderScope="group"
         />
       ) : activePlaylist ? (
@@ -673,7 +674,7 @@ function QueuePanel({
           onReorder={onReorder}
           getKey={(item) => `${item.playlist_id}:${item.position.toString()}`}
           getColor={(item) => playlistColors.get(item.playlist_id) ?? '#c084fc'}
-          renderItem={(item) => <TrackLabel item={item} />}
+          renderItem={(item) => <QueueTrackLabel item={item} />}
         />
       ) : null}
     </section>
@@ -701,15 +702,6 @@ function applyReorderOptimistic(queue: QueueState, item: QueueItem, toPosition: 
   })
 
   return { unified: newUnified, playlists: newPlaylists }
-}
-
-function TrackLabel({ item }: { item: QueueItem }) {
-  return (
-    <span className={styles.queueTrackText}>
-      <span className={styles.queueTrackName}>{item.name ?? item.uri}</span>
-      {item.artist && <span className={styles.queueArtistName}>{item.artist}</span>}
-    </span>
-  )
 }
 
 function SkipTurnIcon() {

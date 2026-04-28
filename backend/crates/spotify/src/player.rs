@@ -388,6 +388,22 @@ struct RawAlbum {
 #[derive(serde::Deserialize)]
 struct RawImage {
     url: String,
+    width: Option<u32>,
+    height: Option<u32>,
+}
+
+fn image_url_for_size(images: Vec<RawImage>, target_px: u32) -> Option<String> {
+    images
+        .into_iter()
+        .min_by_key(|image| {
+            let size = image.width.or(image.height).unwrap_or(u32::MAX);
+            if size >= target_px {
+                (0, size - target_px)
+            } else {
+                (1, target_px - size)
+            }
+        })
+        .map(|image| image.url)
 }
 
 pub async fn get_track(access_token: &str, track_id: &str) -> anyhow::Result<TrackDetails> {
@@ -411,7 +427,7 @@ pub async fn get_track(access_token: &str, track_id: &str) -> anyhow::Result<Tra
             .map(|a| a.name)
             .collect::<Vec<_>>()
             .join(", "),
-        album_art_url: raw.album.images.into_iter().next().map(|i| i.url),
+        album_art_url: image_url_for_size(raw.album.images, 560),
         duration_ms: raw.duration_ms,
     })
 }

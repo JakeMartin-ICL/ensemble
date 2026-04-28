@@ -1055,6 +1055,7 @@
 }
 
 .queueItem {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
@@ -1108,6 +1109,26 @@
   gap: 2px;
 }
 
+.queueItemArt {
+  position: absolute;
+  left: 14px;
+  top: 50%;
+  width: 42px;
+  height: 42px;
+  border-radius: 7px;
+  object-fit: cover;
+  background: var(--surface-3);
+  transform: translateY(-50%);
+}
+
+.queueTrackTextCentered {
+  grid-column: 1 / -1;
+  width: 100%;
+  align-items: center;
+  padding-inline: 62px;
+  text-align: center;
+}
+
 .sourceQueueList {
   display: grid;
   gap: 8px;
@@ -1122,14 +1143,37 @@
 }
 
 .sourceQueueItem {
+  position: relative;
   display: grid;
-  grid-template-columns: 42px minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   align-items: center;
   gap: 10px;
+  min-height: 64px;
   padding: 10px 12px;
   border: 1px solid var(--border-subtle);
   border-radius: 10px;
   background: var(--surface-2);
+}
+
+.sourceQueueItem > .queueItemArt {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.sourceQueueItem .queueTrackTextCentered {
+  padding-inline: 96px;
+}
+
+.sourceQueueMeta {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 
 @keyframes queueItemExit {
@@ -1173,6 +1217,88 @@
 
 .queuePlaylistName {
   max-width: 120px;
+}
+
+.queueAttributionBadge {
+  position: absolute;
+  top: 50%;
+  right: 14px;
+  transform: translateY(-50%);
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(248, 247, 255, 0.16);
+  border-radius: 50%;
+  background: rgba(248, 247, 255, 0.06);
+  color: rgba(248, 247, 255, 0.7);
+  font-family: var(--sans);
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+  flex: 0 0 auto;
+  cursor: pointer;
+  padding: 0;
+}
+
+.sourceQueueMeta .queueAttributionBadge {
+  position: relative;
+  top: auto;
+  right: auto;
+  transform: none;
+}
+
+.queueAttributionBubble {
+  position: absolute;
+  right: 50%;
+  bottom: calc(100% + 8px);
+  z-index: 45;
+  max-width: min(180px, calc(100vw - 40px));
+  padding: 7px 10px;
+  border: 1px solid rgba(248, 247, 255, 0.18);
+  border-radius: 999px;
+  background: rgba(20, 20, 30, 0.96);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.38);
+  color: var(--text-h);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+  text-transform: none;
+  white-space: nowrap;
+  opacity: 0;
+  transform: translateX(50%) translateY(4px) scale(0.96);
+  animation: attributionBubbleIn 0.16s ease-out forwards;
+  pointer-events: none;
+}
+
+.queueAttributionBubbleClosing {
+  animation: attributionBubbleOut 0.16s ease-in forwards;
+}
+
+@media (max-width: 480px) {
+  .sourceQueueItem .queueTrackTextCentered {
+    padding-inline: 76px;
+  }
+}
+
+@keyframes attributionBubbleIn {
+  to {
+    opacity: 1;
+    transform: translateX(50%) translateY(0) scale(1);
+  }
+}
+
+@keyframes attributionBubbleOut {
+  from {
+    opacity: 1;
+    transform: translateX(50%) translateY(0) scale(1);
+  }
+
+  to {
+    opacity: 0;
+    transform: translateX(50%) translateY(4px) scale(0.96);
+  }
 }
 
 .queueMoveControls {

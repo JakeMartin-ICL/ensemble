@@ -23,6 +23,7 @@ pub struct PartySession {
     pub allow_guest_playlist_adds: bool,
     pub source_min_queue_size: i32,
     pub add_added_tracks_to_source: bool,
+    pub show_queue_attribution: bool,
     pub current_track_uri: Option<String>,
     pub queued_track_uri: Option<String>,
     pub is_active: bool,
@@ -37,6 +38,7 @@ pub struct PartyQueueItem {
     pub position: i32,
     pub track: Json<PartyTrack>,
     pub added_by_user_id: Option<Uuid>,
+    pub added_by_display_name: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -47,6 +49,7 @@ pub struct PartySourceQueueItem {
     pub position: i32,
     pub track: Json<PartyTrack>,
     pub added_by_user_id: Option<Uuid>,
+    pub added_by_display_name: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -106,7 +109,7 @@ pub async fn create_session(pool: &PgPool, s: &NewPartySession) -> anyhow::Resul
         )
         VALUES ($1, $2, $3, $4)
         RETURNING id, host_user_id, room_code, mode, allow_guest_playlist_adds,
-                  source_min_queue_size, add_added_tracks_to_source,
+                  source_min_queue_size, add_added_tracks_to_source, show_queue_attribution,
                   current_track_uri, queued_track_uri, is_active, created_at, updated_at
         "#,
     )
@@ -127,7 +130,7 @@ pub async fn get_active_session(
     let session = sqlx::query_as::<_, PartySession>(
         r#"
         SELECT id, host_user_id, room_code, mode, allow_guest_playlist_adds,
-               source_min_queue_size, add_added_tracks_to_source,
+               source_min_queue_size, add_added_tracks_to_source, show_queue_attribution,
                current_track_uri, queued_track_uri, is_active, created_at, updated_at
         FROM public.party_sessions
         WHERE host_user_id = $1 AND is_active = true
@@ -146,7 +149,7 @@ pub async fn get_session(pool: &PgPool, session_id: Uuid) -> anyhow::Result<Opti
     let session = sqlx::query_as::<_, PartySession>(
         r#"
         SELECT id, host_user_id, room_code, mode, allow_guest_playlist_adds,
-               source_min_queue_size, add_added_tracks_to_source,
+               source_min_queue_size, add_added_tracks_to_source, show_queue_attribution,
                current_track_uri, queued_track_uri, is_active, created_at, updated_at
         FROM public.party_sessions
         WHERE id = $1
@@ -166,7 +169,7 @@ pub async fn get_session_by_room_code(
     let session = sqlx::query_as::<_, PartySession>(
         r#"
         SELECT id, host_user_id, room_code, mode, allow_guest_playlist_adds,
-               source_min_queue_size, add_added_tracks_to_source,
+               source_min_queue_size, add_added_tracks_to_source, show_queue_attribution,
                current_track_uri, queued_track_uri, is_active, created_at, updated_at
         FROM public.party_sessions
         WHERE room_code = $1 AND is_active = true
@@ -212,7 +215,7 @@ pub async fn set_mode(
         SET mode = $1, updated_at = now()
         WHERE id = $2
         RETURNING id, host_user_id, room_code, mode, allow_guest_playlist_adds,
-                  source_min_queue_size, add_added_tracks_to_source,
+                  source_min_queue_size, add_added_tracks_to_source, show_queue_attribution,
                   current_track_uri, queued_track_uri, is_active, created_at, updated_at
         "#,
     )
@@ -235,7 +238,7 @@ pub async fn set_allow_guest_playlist_adds(
         SET allow_guest_playlist_adds = $1, updated_at = now()
         WHERE id = $2
         RETURNING id, host_user_id, room_code, mode, allow_guest_playlist_adds,
-                  source_min_queue_size, add_added_tracks_to_source,
+                  source_min_queue_size, add_added_tracks_to_source, show_queue_attribution,
                   current_track_uri, queued_track_uri, is_active, created_at, updated_at
         "#,
     )
@@ -259,7 +262,7 @@ pub async fn set_source_settings(
         SET source_min_queue_size = $1, add_added_tracks_to_source = $2, updated_at = now()
         WHERE id = $3
         RETURNING id, host_user_id, room_code, mode, allow_guest_playlist_adds,
-                  source_min_queue_size, add_added_tracks_to_source,
+                  source_min_queue_size, add_added_tracks_to_source, show_queue_attribution,
                   current_track_uri, queued_track_uri, is_active, created_at, updated_at
         "#,
     )
@@ -269,6 +272,29 @@ pub async fn set_source_settings(
     .fetch_one(pool)
     .await
     .context("updating party source settings")?;
+    Ok(session)
+}
+
+pub async fn set_show_queue_attribution(
+    pool: &PgPool,
+    session_id: Uuid,
+    show_queue_attribution: bool,
+) -> anyhow::Result<PartySession> {
+    let session = sqlx::query_as::<_, PartySession>(
+        r#"
+        UPDATE public.party_sessions
+        SET show_queue_attribution = $1, updated_at = now()
+        WHERE id = $2
+        RETURNING id, host_user_id, room_code, mode, allow_guest_playlist_adds,
+                  source_min_queue_size, add_added_tracks_to_source, show_queue_attribution,
+                  current_track_uri, queued_track_uri, is_active, created_at, updated_at
+        "#,
+    )
+    .bind(show_queue_attribution)
+    .bind(session_id)
+    .fetch_one(pool)
+    .await
+    .context("updating party queue attribution setting")?;
     Ok(session)
 }
 
@@ -315,10 +341,12 @@ pub async fn set_queued_track(
 pub async fn queue_items(pool: &PgPool, session_id: Uuid) -> anyhow::Result<Vec<PartyQueueItem>> {
     let items = sqlx::query_as::<_, PartyQueueItem>(
         r#"
-        SELECT id, session_id, position, track, added_by_user_id, created_at
-        FROM public.party_queue_items
-        WHERE session_id = $1
-        ORDER BY position ASC, created_at ASC
+        SELECT q.id, q.session_id, q.position, q.track, q.added_by_user_id,
+               u.display_name AS added_by_display_name, q.created_at
+        FROM public.party_queue_items q
+        LEFT JOIN public.users u ON u.id = q.added_by_user_id
+        WHERE q.session_id = $1
+        ORDER BY q.position ASC, q.created_at ASC
         "#,
     )
     .bind(session_id)
@@ -334,10 +362,12 @@ pub async fn first_queue_item(
 ) -> anyhow::Result<Option<PartyQueueItem>> {
     let item = sqlx::query_as::<_, PartyQueueItem>(
         r#"
-        SELECT id, session_id, position, track, added_by_user_id, created_at
-        FROM public.party_queue_items
-        WHERE session_id = $1
-        ORDER BY position ASC, created_at ASC
+        SELECT q.id, q.session_id, q.position, q.track, q.added_by_user_id,
+               u.display_name AS added_by_display_name, q.created_at
+        FROM public.party_queue_items q
+        LEFT JOIN public.users u ON u.id = q.added_by_user_id
+        WHERE q.session_id = $1
+        ORDER BY q.position ASC, q.created_at ASC
         LIMIT 1
         "#,
     )
@@ -392,7 +422,7 @@ pub async fn add_queue_item(
         r#"
         INSERT INTO public.party_queue_items (session_id, position, track, added_by_user_id)
         VALUES ($1, $2, $3, $4)
-        RETURNING id, session_id, position, track, added_by_user_id, created_at
+        RETURNING id, session_id, position, track, added_by_user_id, NULL::text AS added_by_display_name, created_at
         "#,
     )
     .bind(item.session_id)
@@ -411,10 +441,12 @@ pub async fn source_queue_items(
 ) -> anyhow::Result<Vec<PartySourceQueueItem>> {
     let items = sqlx::query_as::<_, PartySourceQueueItem>(
         r#"
-        SELECT id, session_id, position, track, added_by_user_id, created_at
-        FROM public.party_source_queue_items
-        WHERE session_id = $1
-        ORDER BY (position < 0) ASC, position ASC, created_at ASC
+        SELECT s.id, s.session_id, s.position, s.track, s.added_by_user_id,
+               u.display_name AS added_by_display_name, s.created_at
+        FROM public.party_source_queue_items s
+        LEFT JOIN public.users u ON u.id = s.added_by_user_id
+        WHERE s.session_id = $1
+        ORDER BY (s.position < 0) ASC, s.position ASC, s.created_at ASC
         "#,
     )
     .bind(session_id)
@@ -634,7 +666,7 @@ pub async fn pop_next_queue_item(
             ORDER BY position ASC, created_at ASC
             LIMIT 1
         )
-        RETURNING id, session_id, position, track, added_by_user_id, created_at
+        RETURNING id, session_id, position, track, added_by_user_id, NULL::text AS added_by_display_name, created_at
         "#,
     )
     .bind(session_id)
@@ -662,7 +694,7 @@ pub async fn remove_first_queue_item_by_uri(
             ORDER BY position ASC, created_at ASC
             LIMIT 1
         )
-        RETURNING id, session_id, position, track, added_by_user_id, created_at
+        RETURNING id, session_id, position, track, added_by_user_id, NULL::text AS added_by_display_name, created_at
         "#,
     )
     .bind(session_id)
@@ -776,7 +808,7 @@ async fn take_next_source_queue_item(
         SET position = deferred.position
         FROM next_item, deferred
         WHERE s.id = next_item.id
-        RETURNING s.id, s.session_id, s.position, s.track, s.added_by_user_id, s.created_at
+        RETURNING s.id, s.session_id, s.position, s.track, s.added_by_user_id, NULL::text AS added_by_display_name, s.created_at
         "#,
     )
     .bind(session_id)
