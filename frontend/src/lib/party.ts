@@ -45,6 +45,7 @@ export interface PartySourceQueueItem {
   duration_ms: number | null
   position: number
   deferred: boolean
+  disabled: boolean
   added_by_user_id: string | null
   added_by_display_name: string | null
 }
@@ -115,6 +116,9 @@ export const getPartyQueue = (id: string) =>
 
 export const getPartySourceQueue = (id: string) =>
   get<PartySourceQueueState>(`/party/sessions/${id}/source-queue`)
+
+export const setPartySourceQueueItemDisabled = (id: string, item_id: string, disabled: boolean) =>
+  post<PartySourceQueueState>(`/party/sessions/${id}/source-queue/${item_id}/disabled`, { disabled })
 
 export const searchPartyTracks = (id: string, q: string, scope: 'local' | 'spotify') =>
   get<PartySearchResponse>(`/party/sessions/${id}/queue/search?q=${encodeURIComponent(q)}&scope=${scope}`)

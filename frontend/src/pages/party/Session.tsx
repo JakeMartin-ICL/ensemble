@@ -25,6 +25,7 @@ import {
   restartPartySession,
   resumePartySession,
   searchPartyTracks,
+  setPartySourceQueueItemDisabled,
   skipPartySession,
   updatePartyMode,
   updatePartySettings,
@@ -370,6 +371,14 @@ export default function PartySessionPage() {
     }
   }
 
+  function handleToggleSourceQueueItemDisabled(itemId: string, disabled: boolean) {
+    if (!session?.is_host) return
+    void setPartySourceQueueItemDisabled(session.id, itemId, disabled)
+      .then(setSourceQueue)
+      .then(() => { refreshQueue(session.id) })
+      .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
+  }
+
   function toggleSettings() {
     if (settingsOpen) {
       closeSettings()
@@ -528,6 +537,7 @@ export default function PartySessionPage() {
           sourceQueue={sourceQueue}
           showAttribution={session.show_queue_attribution}
           onHide={handleToggleSourceQueue}
+          onToggleDisabled={handleToggleSourceQueueItemDisabled}
         />
       )}
 
@@ -1004,11 +1014,14 @@ function SourceQueuePanel({
   sourceQueue,
   showAttribution,
   onHide,
+  onToggleDisabled,
 }: {
   sourceQueue: PartySourceQueueState
   showAttribution: boolean
   onHide: () => void
+  onToggleDisabled: (itemId: string, disabled: boolean) => void
 }) {
+  const [disableMode, setDisableMode] = useState(false)
   const itemElsRef = useRef<Map<string, HTMLDivElement>>(new Map())
   const previousRectsRef = useRef<Map<string, DOMRect>>(new Map())
   const previousItemsRef = useRef<PartySourceQueueState['items']>([])
@@ -1086,9 +1099,20 @@ function SourceQueuePanel({
     <section className={styles.queuePanel}>
       <div className={styles.sourceQueueHeader}>
         <button className={styles.queueTab} type="button">Source queue</button>
-        <button className={styles.pillGhostBtn} onClick={onHide} type="button">
-          Hide
-        </button>
+        <div className={styles.sourceQueueHeaderActions}>
+          <button
+            className={`${styles.pillIconBtn}${disableMode ? ` ${styles.pillIconBtnActive}` : ''}`}
+            onClick={() => { setDisableMode(!disableMode) }}
+            type="button"
+            aria-label="Disable tracks"
+            title="Disable tracks"
+          >
+            <DisableTrackIcon />
+          </button>
+          <button className={styles.pillGhostBtn} onClick={onHide} type="button">
+            Hide
+          </button>
+        </div>
       </div>
       {sourceQueue.items.length === 0 ? (
         <p className={styles.queueEmpty}>No source songs</p>
@@ -1101,12 +1125,24 @@ function SourceQueuePanel({
                 if (el) itemElsRef.current.set(item.id, el)
                 else itemElsRef.current.delete(item.id)
               }}
-              className={styles.sourceQueueItem}
+              className={`${styles.sourceQueueItem}${item.disabled ? ` ${styles.sourceQueueItemDisabled}` : ''}`}
             >
               <QueueTrackLabel item={item} />
               <span className={styles.sourceQueueMeta}>
                 {showAttribution && <AttributionBadge name={item.added_by_display_name} />}
+                {item.disabled && <span className={styles.turnBadge}>Off</span>}
                 {item.deferred && <span className={styles.turnBadge}>Later</span>}
+                {disableMode && (
+                  <button
+                    className={`${styles.sourceQueueToggleBtn}${item.disabled ? ` ${styles.sourceQueueToggleBtnActive}` : ''}`}
+                    onClick={() => { onToggleDisabled(item.id, !item.disabled) }}
+                    type="button"
+                    aria-label={item.disabled ? 'Enable track' : 'Disable track'}
+                    title={item.disabled ? 'Enable track' : 'Disable track'}
+                  >
+                    {item.disabled ? <EnableTrackIcon /> : <DisableTrackIcon />}
+                  </button>
+                )}
               </span>
             </div>
           ))}
@@ -1115,7 +1151,7 @@ function SourceQueuePanel({
       {exitItems.map(({ item, rect }) => (
         <div
           key={item.id}
-          className={`${styles.sourceQueueItem} ${styles.queueExitItem}`}
+          className={`${styles.sourceQueueItem}${item.disabled ? ` ${styles.sourceQueueItemDisabled}` : ''} ${styles.queueExitItem}`}
           style={{
             top: rect.top,
             left: rect.left,
@@ -1128,6 +1164,7 @@ function SourceQueuePanel({
           <QueueTrackLabel item={item} />
           <span className={styles.sourceQueueMeta}>
             {showAttribution && <AttributionBadge name={item.added_by_display_name} />}
+            {item.disabled && <span className={styles.turnBadge}>Off</span>}
             {item.deferred && <span className={styles.turnBadge}>Later</span>}
           </span>
         </div>
@@ -1259,6 +1296,22 @@ function PlusIcon() {
   return (
     <IconSvg>
       <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm5 11h-4v4h-2v-4H7v-2h4V7h2v4h4v2z" />
+    </IconSvg>
+  )
+}
+
+function DisableTrackIcon() {
+  return (
+    <IconSvg>
+      <path d="M6.7 5.3 18.7 17.3l-1.4 1.4-2.05-2.05A7 7 0 0 1 5.35 6.75L3.3 4.7l1.4-1.4 2 2ZM12 5a7 7 0 0 1 6.65 9.2L9.8 5.35A7.08 7.08 0 0 1 12 5Zm0 2a5.1 5.1 0 0 0-.42.02l5.4 5.4A5 5 0 0 0 12 7Zm0 10a5 5 0 0 0 1.78-.33L7.33 10.22A5 5 0 0 0 12 17Z" />
+    </IconSvg>
+  )
+}
+
+function EnableTrackIcon() {
+  return (
+    <IconSvg>
+      <path d="M12 5a7 7 0 1 1 0 14A7 7 0 0 1 12 5Zm0 2a5 5 0 1 0 0 10 5 5 0 0 0 0-10Zm-1 2.5 4 2.5-4 2.5v-5Z" />
     </IconSvg>
   )
 }

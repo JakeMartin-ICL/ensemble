@@ -139,9 +139,7 @@ pub async fn get_tracks(
                             .map(|a| a.name)
                             .collect::<Vec<_>>()
                             .join(", "),
-                        album_art_url: item
-                            .album
-                            .and_then(|a| image_url_for_size(a.images, 128)),
+                        album_art_url: item.album.and_then(|a| image_url_for_size(a.images, 128)),
                         duration_ms: item.duration_ms.unwrap_or(0),
                     });
                 }
@@ -288,9 +286,7 @@ pub async fn search_tracks(
                     .map(|a| a.name)
                     .collect::<Vec<_>>()
                     .join(", "),
-                album_art_url: item
-                    .album
-                    .and_then(|a| image_url_for_size(a.images, 128)),
+                album_art_url: item.album.and_then(|a| image_url_for_size(a.images, 128)),
                 duration_ms: item.duration_ms.unwrap_or(0),
             })
         })

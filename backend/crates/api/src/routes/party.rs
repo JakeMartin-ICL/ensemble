@@ -45,6 +45,10 @@ pub fn router() -> Router<AppState> {
             post(add_queue_playlist),
         )
         .route("/sessions/{id}/source-queue", get(get_source_queue))
+        .route(
+            "/sessions/{id}/source-queue/{item_id}/disabled",
+            post(set_source_queue_item_disabled),
+        )
         .route("/sessions/{id}/queue/search", get(search_queue_tracks))
         .route("/sessions/{id}/queue/reorder", post(reorder_queue))
         .route("/sessions/{id}/queue/remove", post(remove_queue_track))
@@ -145,8 +149,14 @@ struct SourceQueueItemResponse {
     duration_ms: Option<u64>,
     position: usize,
     deferred: bool,
+    disabled: bool,
     added_by_user_id: Option<Uuid>,
     added_by_display_name: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct SourceQueueDisabledBody {
+    disabled: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -706,6 +716,25 @@ async fn get_source_queue(
     Ok(Json(build_source_queue_response(&state, session_id).await?))
 }
 
+async fn set_source_queue_item_disabled(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((session_id, item_id)): Path<(Uuid, Uuid)>,
+    Json(body): Json<SourceQueueDisabledBody>,
+) -> ApiResult<SourceQueueResponse> {
+    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    get_host_session(&state, session_id, user_id).await?;
+
+    db::party::set_source_queue_item_disabled(&state.pool, session_id, item_id, body.disabled)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    db::party::refill_queue_from_source(&state.pool, session_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(build_source_queue_response(&state, session_id).await?))
+}
+
 async fn reorder_queue(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -858,6 +887,7 @@ async fn build_source_queue_response(
             duration_ms: item.track.duration_ms,
             position,
             deferred: item.position < 0,
+            disabled: item.disabled,
             added_by_user_id: item.added_by_user_id,
             added_by_display_name: item.added_by_display_name,
         })

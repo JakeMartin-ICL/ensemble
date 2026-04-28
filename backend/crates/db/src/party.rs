@@ -47,6 +47,7 @@ pub struct PartySourceQueueItem {
     pub id: Uuid,
     pub session_id: Uuid,
     pub position: i32,
+    pub disabled: bool,
     pub track: Json<PartyTrack>,
     pub added_by_user_id: Option<Uuid>,
     pub added_by_display_name: Option<String>,
@@ -441,12 +442,12 @@ pub async fn source_queue_items(
 ) -> anyhow::Result<Vec<PartySourceQueueItem>> {
     let items = sqlx::query_as::<_, PartySourceQueueItem>(
         r#"
-        SELECT s.id, s.session_id, s.position, s.track, s.added_by_user_id,
+        SELECT s.id, s.session_id, s.position, s.disabled, s.track, s.added_by_user_id,
                u.display_name AS added_by_display_name, s.created_at
         FROM public.party_source_queue_items s
         LEFT JOIN public.users u ON u.id = s.added_by_user_id
         WHERE s.session_id = $1
-        ORDER BY (s.position < 0) ASC, s.position ASC, s.created_at ASC
+        ORDER BY s.disabled ASC, (s.position < 0) ASC, s.position ASC, s.created_at ASC
         "#,
     )
     .bind(session_id)
@@ -454,6 +455,35 @@ pub async fn source_queue_items(
     .await
     .context("fetching party source queue items")?;
     Ok(items)
+}
+
+pub async fn set_source_queue_item_disabled(
+    pool: &PgPool,
+    session_id: Uuid,
+    item_id: Uuid,
+    disabled: bool,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE public.party_source_queue_items
+        SET disabled = $1
+        WHERE id = $2 AND session_id = $3
+        "#,
+    )
+    .bind(disabled)
+    .bind(item_id)
+    .bind(session_id)
+    .execute(pool)
+    .await
+    .context("updating party source queue disabled state")?;
+
+    sqlx::query("UPDATE public.party_sessions SET updated_at = now() WHERE id = $1")
+        .bind(session_id)
+        .execute(pool)
+        .await
+        .context("touching party session after source queue disabled update")?;
+
+    Ok(())
 }
 
 pub async fn add_source_queue_items(
@@ -756,14 +786,14 @@ async fn queue_len(pool: &PgPool, session_id: Uuid) -> anyhow::Result<i32> {
     i32::try_from(count).context("party queue count overflow")
 }
 
-async fn source_len(pool: &PgPool, session_id: Uuid) -> anyhow::Result<i64> {
+async fn source_enabled_len(pool: &PgPool, session_id: Uuid) -> anyhow::Result<i64> {
     sqlx::query_scalar::<_, i64>(
-        "SELECT count(*) FROM public.party_source_queue_items WHERE session_id = $1",
+        "SELECT count(*) FROM public.party_source_queue_items WHERE session_id = $1 AND disabled = false",
     )
     .bind(session_id)
     .fetch_one(pool)
     .await
-    .context("counting party source queue items")
+    .context("counting enabled party source queue items")
 }
 
 async fn pop_next_source_queue_item(
@@ -771,7 +801,7 @@ async fn pop_next_source_queue_item(
     session_id: Uuid,
 ) -> anyhow::Result<Option<PartySourceQueueItem>> {
     let item = take_next_source_queue_item(pool, session_id).await?;
-    if item.is_some() || source_len(pool, session_id).await? == 0 {
+    if item.is_some() || source_enabled_len(pool, session_id).await? == 0 {
         return Ok(item);
     }
 
@@ -790,6 +820,7 @@ async fn take_next_source_queue_item(
             FROM public.party_source_queue_items s
             WHERE s.session_id = $1
               AND s.position >= 0
+              AND s.disabled = false
               AND NOT EXISTS (
                 SELECT 1
                 FROM public.party_queue_items q
@@ -808,7 +839,7 @@ async fn take_next_source_queue_item(
         SET position = deferred.position
         FROM next_item, deferred
         WHERE s.id = next_item.id
-        RETURNING s.id, s.session_id, s.position, s.track, s.added_by_user_id, NULL::text AS added_by_display_name, s.created_at
+        RETURNING s.id, s.session_id, s.position, s.disabled, s.track, s.added_by_user_id, NULL::text AS added_by_display_name, s.created_at
         "#,
     )
     .bind(session_id)
