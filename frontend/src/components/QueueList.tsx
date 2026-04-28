@@ -20,9 +20,11 @@ export default function QueueList<T extends PositionedItem>({
   renderItem,
   renderActions,
   onReorder,
+  onTopDrop,
   onRemoveDrop,
   canReorder = true,
   reorderScope = 'all',
+  topDropLabel = 'Top',
   removeDropLabel = 'Remove',
   pulseKey,
   pulseToken = 0,
@@ -34,9 +36,11 @@ export default function QueueList<T extends PositionedItem>({
   renderItem: (item: T) => React.ReactNode
   renderActions?: (item: T) => React.ReactNode
   onReorder: (item: T, toPosition: number) => void
+  onTopDrop?: (item: T) => void
   onRemoveDrop?: (item: T) => void
   canReorder?: boolean
   reorderScope?: 'all' | 'group'
+  topDropLabel?: string
   removeDropLabel?: string
   pulseKey?: string | null
   pulseToken?: number
@@ -44,10 +48,12 @@ export default function QueueList<T extends PositionedItem>({
   const [dragKey, setDragKey] = useState<string | null>(null)
   const [dragDelta, setDragDelta] = useState(0)
   const [insertIdx, setInsertIdx] = useState(0)
+  const [topHot, setTopHot] = useState(false)
   const [removeHot, setRemoveHot] = useState(false)
   const [exitItems, setExitItems] = useState<ExitItem<T>[]>([])
 
   const itemElsRef = useRef<Map<string, HTMLElement>>(new Map())
+  const topZoneRef = useRef<HTMLDivElement | null>(null)
   const removeZoneRef = useRef<HTMLDivElement | null>(null)
   const pointerIdRef = useRef<number | null>(null)
   const holdTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -156,6 +162,7 @@ export default function QueueList<T extends PositionedItem>({
     setDragKey(null)
     setDragDelta(0)
     setInsertIdx(0)
+    setTopHot(false)
     setRemoveHot(false)
     stopAutoScroll()
   }
@@ -341,6 +348,7 @@ export default function QueueList<T extends PositionedItem>({
     if (!dragKeyRef.current || getKey(item) !== dragKeyRef.current) return
     deltaPendingRef.current = e.clientY - startYRef.current
 
+    setTopHot(isPointerOverTopZone(e.clientX, e.clientY))
     setRemoveHot(isPointerOverRemoveZone(e.clientX, e.clientY))
 
     const draggedItem = items.find((candidate) => getKey(candidate) === dragKeyRef.current)
@@ -369,7 +377,9 @@ export default function QueueList<T extends PositionedItem>({
     if (dragKeyRef.current && getKey(item) === dragKeyRef.current) {
       const draggedItem = items.find((candidate) => getKey(candidate) === dragKeyRef.current)
       const finalInsertIdx = insertIdxRef.current
-      if (draggedItem && onRemoveDrop && isPointerOverRemoveZone(e.clientX, e.clientY)) {
+      if (draggedItem && onTopDrop && isPointerOverTopZone(e.clientX, e.clientY)) {
+        onTopDrop(draggedItem)
+      } else if (draggedItem && onRemoveDrop && isPointerOverRemoveZone(e.clientX, e.clientY)) {
         onRemoveDrop(draggedItem)
       } else if (draggedItem && finalInsertIdx !== draggedItem.position) {
         onReorder(draggedItem, finalInsertIdx)
@@ -387,6 +397,11 @@ export default function QueueList<T extends PositionedItem>({
   if (items.length === 0) return <p className={styles.queueEmpty}>Nothing queued</p>
 
   const draggedItem = dragKey ? (items.find((item) => getKey(item) === dragKey) ?? null) : null
+
+  function isPointerOverTopZone(x: number, y: number): boolean {
+    const rect = topZoneRef.current?.getBoundingClientRect()
+    return rect ? x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom : false
+  }
 
   function isPointerOverRemoveZone(x: number, y: number): boolean {
     const rect = removeZoneRef.current?.getBoundingClientRect()
@@ -458,13 +473,26 @@ export default function QueueList<T extends PositionedItem>({
           {renderActions?.(exitItem.item)}
         </div>
       ))}
-      {dragKey && onRemoveDrop && (
-        <div
-          ref={removeZoneRef}
-          className={`${styles.queueRemoveDrop}${removeHot ? ` ${styles.queueRemoveDropHot}` : ''}`}
-        >
-          ×
-          <span>{removeDropLabel}</span>
+      {dragKey && (onTopDrop != null || onRemoveDrop != null) && (
+        <div className={styles.queueDropTargets}>
+          {onTopDrop && (
+            <div
+              ref={topZoneRef}
+              className={`${styles.queueDropTarget} ${styles.queueTopDrop}${topHot ? ` ${styles.queueTopDropHot}` : ''}`}
+            >
+              ↑
+              <span>{topDropLabel}</span>
+            </div>
+          )}
+          {onRemoveDrop && (
+            <div
+              ref={removeZoneRef}
+              className={`${styles.queueDropTarget} ${styles.queueRemoveDrop}${removeHot ? ` ${styles.queueRemoveDropHot}` : ''}`}
+            >
+              ×
+              <span>{removeDropLabel}</span>
+            </div>
+          )}
         </div>
       )}
     </>

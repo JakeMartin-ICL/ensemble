@@ -843,6 +843,7 @@ function PartyQueuePanel({
           pulseKey={duplicatePulse?.itemId}
           pulseToken={duplicatePulse?.token}
           onReorder={onReorder}
+          onTopDrop={canEditQueue ? (item) => { onReorder(item, 0) } : undefined}
           onRemoveDrop={canEditQueue ? onRemove : undefined}
           removeDropLabel="Remove"
           renderItem={(item) => (
