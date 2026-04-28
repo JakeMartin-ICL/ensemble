@@ -43,11 +43,13 @@ pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<
     let access_token = if user.token_expires_at.signed_duration_since(Utc::now())
         < chrono::Duration::seconds(60)
     {
-        let tokens = spotify::auth::refresh_token(
-            &user.refresh_token,
-            &state.spotify_client_id,
-            &state.spotify_client_secret,
-        )
+        let client_id = user.spotify_client_id.as_deref().ok_or_else(|| {
+            err(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Spotify client ID is missing; reconnect Spotify",
+            )
+        })?;
+        let tokens = spotify::auth::refresh_token_pkce(&user.refresh_token, client_id)
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
 

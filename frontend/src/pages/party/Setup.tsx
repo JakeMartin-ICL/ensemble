@@ -9,15 +9,20 @@ import {
   getPartyLibraryTracks,
   joinPartySession,
 } from '../../lib/party'
+import { setAcknowledgedSpotifySetup } from '../../lib/spotifyAuth'
 import styles from '../../styles/Mode.module.css'
 
 const PARTY_SESSION_KEY = 'party_session_id'
 const PARTY_GUEST_SESSION_KEY = 'party_guest_session_id'
+const PARTY_GUEST_TOKEN_KEY = 'party_guest_session_token'
+type PartySetupMode = 'host' | 'join'
 
 export default function PartyHome() {
   const [active, setActive] = useState<PartySession | null | undefined>(undefined)
+  const [mode, setMode] = useState<PartySetupMode>('join')
   const [joinCode, setJoinCode] = useState('')
-  const [joinAsGuest, setJoinAsGuest] = useState(false)
+  const [guestName, setGuestName] = useState(() => localStorage.getItem('party_guest_name') ?? '')
+  const [advancedOpen, setAdvancedOpen] = useState(false)
   const [playlists, setPlaylists] = useState<PartyPlaylistSearchResult[]>([])
   const [sourcePlaylistId, setSourcePlaylistId] = useState('')
   const [minimumQueueSize, setMinimumQueueSize] = useState(3)
@@ -25,31 +30,39 @@ export default function PartyHome() {
   const [libraryLoading, setLibraryLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const navigate = useNavigate()
+  const hasSpotifySession = Boolean(localStorage.getItem('user_id') && localStorage.getItem('session_token'))
+  const [spotifyJoin, setSpotifyJoin] = useState(hasSpotifySession)
 
   useEffect(() => {
+    if (!hasSpotifySession) {
+      setActive(null)
+      return
+    }
     void getActivePartySession()
       .then(setActive)
       .catch((e: unknown) => {
         setError(e instanceof Error ? e.message : String(e))
         setActive(null)
       })
-  }, [])
+  }, [hasSpotifySession])
 
   useEffect(() => {
+    if (!hasSpotifySession) return
     setLibraryLoading(true)
     void getPartyLibraryTracks(0)
       .then((response) => { setPlaylists(response.playlists) })
       .catch(() => { setPlaylists([]) })
       .finally(() => { setLibraryLoading(false) })
-  }, [])
+  }, [hasSpotifySession])
 
-  function goToSession(session: PartySession, asGuest = false) {
+  function goToSession(session: PartySession) {
     localStorage.setItem(PARTY_SESSION_KEY, session.id)
-    if (import.meta.env.DEV && asGuest) {
-      localStorage.setItem(PARTY_GUEST_SESSION_KEY, session.id)
+    if (session.session_token) {
+      localStorage.setItem(PARTY_GUEST_TOKEN_KEY, session.session_token)
     } else {
-      localStorage.removeItem(PARTY_GUEST_SESSION_KEY)
+      localStorage.removeItem(PARTY_GUEST_TOKEN_KEY)
     }
+    localStorage.removeItem(PARTY_GUEST_SESSION_KEY)
     void navigate('/party/session')
   }
 
@@ -70,10 +83,14 @@ export default function PartyHome() {
 
   function handleJoin() {
     if (joinCode.trim().length < 4) return
+    if (!spotifyJoin && guestName.trim().length < 1) return
     setLoading(true)
     setError(null)
-    void joinPartySession(joinCode)
-      .then((session) => { goToSession(session, joinAsGuest) })
+    if (!spotifyJoin) {
+      localStorage.setItem('party_guest_name', guestName.trim())
+    }
+    void joinPartySession(joinCode, spotifyJoin ? undefined : guestName.trim())
+      .then((session) => { goToSession(session) })
       .catch((e: unknown) => {
         setError(e instanceof Error ? e.message : String(e))
         setLoading(false)
@@ -89,7 +106,24 @@ export default function PartyHome() {
 
       {error && <p className={styles.error}>{error}</p>}
 
-      {active && (
+      <div className={styles.modeToggle} role="tablist" aria-label="Party setup mode">
+        <button
+          className={`${styles.modeToggleBtn} ${mode === 'host' ? styles.modeToggleBtnActive : ''}`}
+          onClick={() => { setMode('host') }}
+          type="button"
+        >
+          Host
+        </button>
+        <button
+          className={`${styles.modeToggleBtn} ${mode === 'join' ? styles.modeToggleBtnActive : ''}`}
+          onClick={() => { setMode('join') }}
+          type="button"
+        >
+          Join
+        </button>
+      </div>
+
+      {mode === 'host' && active && (
         <div className={styles.card}>
           <p className={styles.subtitle}>Room {active.room_code}</p>
           <div className={styles.actions}>
@@ -110,70 +144,105 @@ export default function PartyHome() {
         </div>
       )}
 
-      <div className={styles.actions}>
-        <button className={styles.primaryBtn} disabled={loading} onClick={handleCreate}>
-          {loading ? 'Starting...' : 'Start party'}
-        </button>
-      </div>
+      {mode === 'host' && (
+        <>
+          {hasSpotifySession && (
+            <div className={styles.card}>
+              <label className={styles.setupField}>
+                <span className={styles.setupLabel}>Source playlist</span>
+                <select
+                  className={styles.searchInput}
+                  value={sourcePlaylistId}
+                  onChange={(e) => { setSourcePlaylistId(e.target.value) }}
+                  aria-label="Source playlist"
+                >
+                  <option value="">{libraryLoading ? 'Loading playlists...' : 'No source playlist'}</option>
+                  {playlists.map((playlist) => (
+                    <option key={playlist.id} value={playlist.id}>
+                      {playlist.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className={styles.setupField}>
+                <span className={styles.setupLabel}>Keep this many songs ready</span>
+                <input
+                  className={styles.searchInput}
+                  type="number"
+                  min="0"
+                  max="25"
+                  value={minimumQueueSize}
+                  onChange={(e) => { setMinimumQueueSize(clampInt(e.target.value, 0, 25)) }}
+                  aria-label="Minimum queue size"
+                />
+              </label>
+            </div>
+          )}
+          <div className={styles.actions}>
+            <button className={styles.primaryBtn} disabled={loading || !hasSpotifySession} onClick={handleCreate}>
+              {hasSpotifySession ? (loading ? 'Starting...' : 'Start party') : 'Connect Spotify to host'}
+            </button>
+          </div>
+        </>
+      )}
 
-      <div className={styles.card}>
-        <label className={styles.setupField}>
-          <span className={styles.setupLabel}>Source playlist</span>
-          <select
-            className={styles.searchInput}
-            value={sourcePlaylistId}
-            onChange={(e) => { setSourcePlaylistId(e.target.value) }}
-            aria-label="Source playlist"
-          >
-            <option value="">{libraryLoading ? 'Loading playlists...' : 'No source playlist'}</option>
-            {playlists.map((playlist) => (
-              <option key={playlist.id} value={playlist.id}>
-                {playlist.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className={styles.setupField}>
-          <span className={styles.setupLabel}>Keep this many songs ready</span>
-          <input
-            className={styles.searchInput}
-            type="number"
-            min="0"
-            max="25"
-            value={minimumQueueSize}
-            onChange={(e) => { setMinimumQueueSize(clampInt(e.target.value, 0, 25)) }}
-            aria-label="Minimum queue size"
-          />
-        </label>
-      </div>
-
-      <div className={styles.card}>
-        <input
-          className={styles.searchInput}
-          value={joinCode}
-          onChange={(e) => { setJoinCode(e.target.value.toUpperCase()) }}
-          placeholder="Room code"
-        />
-        {import.meta.env.DEV && (
-          <label className={styles.devToggle}>
+      {mode === 'join' && (
+        <>
+          <div className={styles.card}>
             <input
-              type="checkbox"
-              checked={joinAsGuest}
-              onChange={(e) => { setJoinAsGuest(e.target.checked) }}
+              className={styles.searchInput}
+              value={joinCode}
+              onChange={(e) => { setJoinCode(e.target.value.toUpperCase()) }}
+              placeholder="Room code"
             />
-            Join as guest in this tab
-          </label>
-        )}
-        <div className={styles.actions}>
-          <button
-            className={styles.ghostBtn}
-            disabled={loading || joinCode.trim().length < 4}
-            onClick={handleJoin}
+            {!spotifyJoin && (
+              <input
+                className={styles.searchInput}
+                value={guestName}
+                onChange={(e) => { setGuestName(e.target.value) }}
+                placeholder="Your name"
+              />
+            )}
+            {spotifyJoin && !hasSpotifySession && (
+              <p className={styles.error}>Connect Spotify from the home screen before joining with Spotify.</p>
+            )}
+          </div>
+
+          <div className={styles.actions}>
+            <button
+              className={styles.primaryBtn}
+              disabled={
+                loading
+                || joinCode.trim().length < 4
+                || (!spotifyJoin && guestName.trim().length < 1)
+                || (spotifyJoin && !hasSpotifySession)
+              }
+              onClick={handleJoin}
+            >
+              {spotifyJoin ? 'Join with Spotify' : 'Join as guest'}
+            </button>
+          </div>
+
+          <details
+            className={styles.advancedPanel}
+            open={advancedOpen}
+            onToggle={(e) => { setAdvancedOpen(e.currentTarget.open) }}
           >
-            Join party
-          </button>
-        </div>
-      </div>
+            <summary>Advanced</summary>
+            <label className={styles.devToggle}>
+              <input
+                type="checkbox"
+                checked={spotifyJoin}
+                onChange={(e) => {
+                  setSpotifyJoin(e.target.checked)
+                  setAcknowledgedSpotifySetup(e.target.checked)
+                }}
+              />
+              I have a Spotify developer app/client ID configured for this browser and want to join with Spotify.
+            </label>
+          </details>
+        </>
+      )}
     </div>
   )
 }

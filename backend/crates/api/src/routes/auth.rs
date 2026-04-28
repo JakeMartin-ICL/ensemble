@@ -31,6 +31,8 @@ pub fn router() -> Router<AppState> {
 #[derive(serde::Deserialize)]
 struct CallbackRequest {
     code: String,
+    client_id: String,
+    code_verifier: String,
 }
 
 #[derive(serde::Serialize)]
@@ -45,10 +47,15 @@ async fn callback(
     State(state): State<AppState>,
     Json(body): Json<CallbackRequest>,
 ) -> ApiResult<CallbackResponse> {
-    let tokens = spotify::auth::exchange_code(
+    let client_id = body.client_id.trim();
+    if client_id.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "Spotify client ID is required"));
+    }
+
+    let tokens = spotify::auth::exchange_code_pkce(
         &body.code,
-        &state.spotify_client_id,
-        &state.spotify_client_secret,
+        client_id,
+        &body.code_verifier,
         &state.spotify_redirect_uri,
     )
     .await
@@ -73,6 +80,7 @@ async fn callback(
         &me.display_name,
         &tokens.access_token,
         &refresh_token,
+        client_id,
         token_expires_at,
     )
     .await
@@ -105,10 +113,15 @@ async fn refresh(State(state): State<AppState>, headers: HeaderMap) -> ApiResult
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "user not found"))?;
 
-    let tokens = spotify::auth::refresh_token(
+    let client_id = user.spotify_client_id.as_deref().ok_or_else(|| {
+        err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Spotify client ID is missing; reconnect Spotify",
+        )
+    })?;
+    let tokens = spotify::auth::refresh_token_pkce(
         &user.refresh_token,
-        &state.spotify_client_id,
-        &state.spotify_client_secret,
+        client_id,
     )
     .await
     .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;

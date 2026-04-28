@@ -15,6 +15,9 @@ export interface PartySession {
   show_queue_attribution: boolean
   current_track_uri: string | null
   is_host: boolean
+  is_guest: boolean
+  display_name: string | null
+  session_token: string | null
 }
 
 export type PartyMode = 'open_queue' | 'shared_queue' | 'voted_queue'
@@ -112,8 +115,8 @@ export interface CreatePartySessionOptions {
 export const createPartySession = (options: CreatePartySessionOptions = {}) =>
   post<PartySession>('/party/sessions', options)
 
-export const joinPartySession = (room_code: string) =>
-  post<PartySession>('/party/sessions/join', { room_code })
+export const joinPartySession = (room_code: string, display_name?: string) =>
+  post<PartySession>('/party/sessions/join', { room_code, display_name })
 
 export const getPartySession = (id: string) =>
   get<PartySession>(`/party/sessions/${id}`)

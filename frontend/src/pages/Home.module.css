@@ -107,6 +107,123 @@
     0 4px 12px rgba(0, 0, 0, 0.4);
 }
 
+.spotifyBtn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+  transform: none;
+}
+
+.setupPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+  max-width: 520px;
+  padding: 20px;
+  box-sizing: border-box;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+}
+
+.guestLink {
+  color: var(--text);
+  font-size: 14px;
+  text-decoration: underline;
+  text-decoration-color: var(--accent-border);
+  text-underline-offset: 4px;
+}
+
+.guideBtn {
+  align-self: flex-start;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-3);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.guidePanel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-1);
+}
+
+.guideList {
+  margin: 0;
+  padding-left: 20px;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.guideLink {
+  align-self: flex-start;
+  color: #1db954;
+  font-size: 13px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.setupField {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.setupLabel {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.setupInput {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 13px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-1);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 14px;
+}
+
+.setupCheck {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.orDivider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.orDivider::before,
+.orDivider::after {
+  content: '';
+  height: 1px;
+  flex: 1;
+  background: var(--border);
+}
+
 .modeGrid {
   display: flex;
   flex-direction: column;

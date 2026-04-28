@@ -53,9 +53,7 @@ ensemble/
 
 | Variable | Purpose |
 |---|---|
-| `SPOTIFY_CLIENT_ID` | Spotify app client ID |
-| `SPOTIFY_CLIENT_SECRET` | Spotify app client secret |
-| `SPOTIFY_REDIRECT_URI` | Must match Spotify app settings (e.g. `http://127.0.0.1:5173/auth/callback`) |
+| `SPOTIFY_REDIRECT_URI` | Must match each user's Spotify app settings (e.g. `http://127.0.0.1:5173/auth/callback`) |
 | `ALLOWED_ORIGIN` | CORS allowed origin for the frontend |
 | `DB_HOST` | Supabase session pooler host |
 | `DB_PORT` | Session pooler port (5432) |
@@ -72,8 +70,7 @@ ensemble/
 | `VITE_API_URL` | Backend base URL, e.g. `http://127.0.0.1:3000` — **must not** have a trailing slash |
 | `VITE_SUPABASE_URL` | Supabase project URL |
 | `VITE_SUPABASE_ANON_KEY` | Supabase anon key (used only for realtime subscriptions) |
-| `VITE_SPOTIFY_CLIENT_ID` | Same as backend's `SPOTIFY_CLIENT_ID` |
-| `VITE_SPOTIFY_REDIRECT_URI` | Same as backend's `SPOTIFY_REDIRECT_URI` |
+| `VITE_SPOTIFY_REDIRECT_URI` | Same as backend's `SPOTIFY_REDIRECT_URI`; users provide their own Spotify client ID in the app |
 
 ---
 

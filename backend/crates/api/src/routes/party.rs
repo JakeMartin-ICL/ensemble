@@ -69,8 +69,6 @@ fn spawn_heartbeat(state: &AppState, session_id: Uuid) {
     let params = party::heartbeat::HeartbeatParams {
         session_id,
         pool: state.pool.clone(),
-        spotify_client_id: state.spotify_client_id.clone(),
-        spotify_client_secret: state.spotify_client_secret.clone(),
     };
 
     let fut = party::heartbeat::run(params);
@@ -102,6 +100,9 @@ struct SessionResponse {
     show_queue_attribution: bool,
     current_track_uri: Option<String>,
     is_host: bool,
+    is_guest: bool,
+    display_name: Option<String>,
+    session_token: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -114,6 +115,7 @@ struct CreateSessionBody {
 #[derive(serde::Deserialize)]
 struct JoinSessionBody {
     room_code: String,
+    display_name: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -160,7 +162,7 @@ struct ExportItemResponse {
 
 #[derive(serde::Serialize, Clone)]
 struct VoterResponse {
-    user_id: Uuid,
+    user_id: String,
     display_name: Option<String>,
 }
 
@@ -323,6 +325,97 @@ impl From<spotify::player::PlaybackState> for PlaybackResponse {
     }
 }
 
+#[derive(Clone)]
+enum PartyActor {
+    User { id: Uuid, display_name: String },
+    Guest { id: Uuid, session_id: Uuid, display_name: String },
+}
+
+impl PartyActor {
+    fn user_id(&self) -> Option<Uuid> {
+        match self {
+            Self::User { id, .. } => Some(*id),
+            Self::Guest { .. } => None,
+        }
+    }
+
+    fn guest_id(&self) -> Option<Uuid> {
+        match self {
+            Self::User { .. } => None,
+            Self::Guest { id, .. } => Some(*id),
+        }
+    }
+
+    fn voter_id(&self) -> String {
+        match self {
+            Self::User { id, .. } | Self::Guest { id, .. } => id.to_string(),
+        }
+    }
+
+    fn display_name(&self) -> &str {
+        match self {
+            Self::User { display_name, .. } | Self::Guest { display_name, .. } => display_name,
+        }
+    }
+
+    fn is_guest(&self) -> bool {
+        matches!(self, Self::Guest { .. })
+    }
+
+    fn can_access_session(&self, session_id: Uuid) -> bool {
+        match self {
+            Self::User { .. } => true,
+            Self::Guest {
+                session_id: guest_session_id,
+                ..
+            } => *guest_session_id == session_id,
+        }
+    }
+}
+
+async fn actor_from_headers(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<PartyActor, (StatusCode, Json<Value>)> {
+    let token = crate::routes::session::bearer_token(headers)?;
+    if let Some(user_id) = db::users::user_id_for_session(&state.pool, token)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
+    {
+        let user = db::users::get_user(&state.pool, user_id)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
+            .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "invalid or expired session"))?;
+        return Ok(PartyActor::User {
+            id: user.id,
+            display_name: user.display_name,
+        });
+    }
+
+    if let Some(guest) = db::party::guest_for_session_token(&state.pool, token)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
+    {
+        return Ok(PartyActor::Guest {
+            id: guest.id,
+            session_id: guest.session_id,
+            display_name: guest.display_name,
+        });
+    }
+
+    Err(err(StatusCode::UNAUTHORIZED, "invalid or expired session"))
+}
+
+async fn user_actor_from_headers(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<PartyActor, (StatusCode, Json<Value>)> {
+    match actor_from_headers(state, headers).await? {
+        actor @ PartyActor::User { .. } => Ok(actor),
+        PartyActor::Guest { .. } => Err(err(StatusCode::FORBIDDEN, "Spotify login required")),
+    }
+}
+
 async fn get_access_token(
     state: &AppState,
     user_id: Uuid,
@@ -337,11 +430,13 @@ async fn get_access_token(
         .signed_duration_since(chrono::Utc::now())
         < chrono::Duration::seconds(60)
     {
-        let tokens = spotify::auth::refresh_token(
-            &user.refresh_token,
-            &state.spotify_client_id,
-            &state.spotify_client_secret,
-        )
+        let client_id = user.spotify_client_id.as_deref().ok_or_else(|| {
+            err(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Spotify client ID is missing; reconnect Spotify",
+            )
+        })?;
+        let tokens = spotify::auth::refresh_token_pkce(&user.refresh_token, client_id)
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
 
@@ -362,7 +457,8 @@ async fn create_session(
     headers: HeaderMap,
     Json(body): Json<CreateSessionBody>,
 ) -> ApiResult<SessionResponse> {
-    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    let actor = user_actor_from_headers(&state, &headers).await?;
+    let user_id = actor.user_id().expect("user actor should have user id");
     let source_min_queue_size = body.source_min_queue_size.unwrap_or(0).clamp(0, 25);
 
     db::party::deactivate_user_sessions(&state.pool, user_id)
@@ -393,7 +489,7 @@ async fn create_session(
                 stop_heartbeat(&state, session.id);
                 spawn_heartbeat(&state, session.id);
                 let updated = get_existing_session(&state, session.id).await?;
-                return Ok(Json(session_response(updated, user_id)));
+                return Ok(Json(session_response(updated, &actor, None)));
             }
             Err(e) => last_error = Some(e),
         }
@@ -409,7 +505,8 @@ async fn get_active_session(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> ApiResult<Option<SessionResponse>> {
-    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    let actor = user_actor_from_headers(&state, &headers).await?;
+    let user_id = actor.user_id().expect("user actor should have user id");
     let session = db::party::get_active_session(&state.pool, user_id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -418,7 +515,7 @@ async fn get_active_session(
         ensure_heartbeat(&state, s);
     }
 
-    Ok(Json(session.map(|s| session_response(s, user_id))))
+    Ok(Json(session.map(|s| session_response(s, &actor, None))))
 }
 
 async fn join_session(
@@ -426,7 +523,6 @@ async fn join_session(
     headers: HeaderMap,
     Json(body): Json<JoinSessionBody>,
 ) -> ApiResult<SessionResponse> {
-    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
     let code = normalize_room_code(&body.room_code);
     let session = db::party::get_session_by_room_code(&state.pool, &code)
         .await
@@ -435,7 +531,34 @@ async fn join_session(
 
     ensure_heartbeat(&state, &session);
 
-    Ok(Json(session_response(session, user_id)))
+    if let Ok(actor @ PartyActor::User { .. }) = actor_from_headers(&state, &headers).await {
+        return Ok(Json(session_response(session, &actor, None)));
+    }
+
+    let display_name = body
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "guest display name is required"))?;
+    let session_token = format!("ens_guest_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    let expires_at = Utc::now() + chrono::Duration::days(1);
+    let guest = db::party::create_guest_session(
+        &state.pool,
+        session.id,
+        display_name,
+        &session_token,
+        expires_at,
+    )
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let actor = PartyActor::Guest {
+        id: guest.id,
+        session_id: guest.session_id,
+        display_name: guest.display_name,
+    };
+
+    Ok(Json(session_response(session, &actor, Some(session_token))))
 }
 
 async fn get_session(
@@ -443,10 +566,13 @@ async fn get_session(
     headers: HeaderMap,
     Path(session_id): Path<Uuid>,
 ) -> ApiResult<SessionResponse> {
-    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    let actor = actor_from_headers(&state, &headers).await?;
     let session = get_existing_session(&state, session_id).await?;
+    if !actor.can_access_session(session.id) {
+        return Err(err(StatusCode::FORBIDDEN, "not your party session"));
+    }
     ensure_heartbeat(&state, &session);
-    Ok(Json(session_response(session, user_id)))
+    Ok(Json(session_response(session, &actor, None)))
 }
 
 async fn get_playback(
@@ -454,7 +580,10 @@ async fn get_playback(
     headers: HeaderMap,
     Path(session_id): Path<Uuid>,
 ) -> ApiResult<Option<PlaybackResponse>> {
-    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    let user_id = user_actor_from_headers(&state, &headers)
+        .await?
+        .user_id()
+        .expect("user actor should have user id");
     let session = get_host_session(&state, session_id, user_id).await?;
     let access_token = get_access_token(&state, session.host_user_id).await?;
 
@@ -470,7 +599,10 @@ async fn pause_session(
     headers: HeaderMap,
     Path(session_id): Path<Uuid>,
 ) -> ApiResult<Option<PlaybackResponse>> {
-    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    let user_id = user_actor_from_headers(&state, &headers)
+        .await?
+        .user_id()
+        .expect("user actor should have user id");
     let session = get_host_session(&state, session_id, user_id).await?;
     let access_token = get_access_token(&state, session.host_user_id).await?;
 
@@ -490,7 +622,10 @@ async fn resume_session(
     headers: HeaderMap,
     Path(session_id): Path<Uuid>,
 ) -> ApiResult<Option<PlaybackResponse>> {
-    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    let user_id = user_actor_from_headers(&state, &headers)
+        .await?
+        .user_id()
+        .expect("user actor should have user id");
     let session = get_host_session(&state, session_id, user_id).await?;
     let access_token = get_access_token(&state, session.host_user_id).await?;
 
@@ -510,7 +645,10 @@ async fn restart_session(
     headers: HeaderMap,
     Path(session_id): Path<Uuid>,
 ) -> ApiResult<Option<PlaybackResponse>> {
-    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    let user_id = user_actor_from_headers(&state, &headers)
+        .await?
+        .user_id()
+        .expect("user actor should have user id");
     let session = get_host_session(&state, session_id, user_id).await?;
     let access_token = get_access_token(&state, session.host_user_id).await?;
 
@@ -530,7 +668,8 @@ async fn skip_to_next(
     headers: HeaderMap,
     Path(session_id): Path<Uuid>,
 ) -> ApiResult<SessionResponse> {
-    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    let actor = user_actor_from_headers(&state, &headers).await?;
+    let user_id = actor.user_id().expect("user actor should have user id");
     let session = get_host_session(&state, session_id, user_id).await?;
     let access_token = get_access_token(&state, session.host_user_id).await?;
     db::party::refill_queue_from_source(&state.pool, session_id)
@@ -554,6 +693,7 @@ async fn skip_to_next(
             session_id,
             track: item.track.0,
             added_by_user_id: item.added_by_user_id,
+            added_by_guest_id: item.added_by_guest_id,
         },
     )
     .await
@@ -563,7 +703,7 @@ async fn skip_to_next(
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let updated = get_existing_session(&state, session_id).await?;
-    Ok(Json(session_response(updated, user_id)))
+    Ok(Json(session_response(updated, &actor, None)))
 }
 
 async fn get_queue(
@@ -571,12 +711,15 @@ async fn get_queue(
     headers: HeaderMap,
     Path(session_id): Path<Uuid>,
 ) -> ApiResult<QueueResponse> {
-    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
-    get_existing_session(&state, session_id).await?;
+    let actor = actor_from_headers(&state, &headers).await?;
+    let session = get_existing_session(&state, session_id).await?;
+    if !actor.can_access_session(session.id) {
+        return Err(err(StatusCode::FORBIDDEN, "not your party session"));
+    }
     db::party::refill_queue_from_source(&state.pool, session_id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(build_queue_response(&state, session_id, user_id).await?))
+    Ok(Json(build_queue_response(&state, session_id, &actor).await?))
 }
 
 async fn update_mode(
@@ -585,7 +728,8 @@ async fn update_mode(
     Path(session_id): Path<Uuid>,
     Json(body): Json<UpdateModeBody>,
 ) -> ApiResult<SessionResponse> {
-    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    let actor = user_actor_from_headers(&state, &headers).await?;
+    let user_id = actor.user_id().expect("user actor should have user id");
     let current = get_host_session(&state, session_id, user_id).await?;
     let mode =
         db::party::PartyMode::from_str(&body.mode).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
@@ -604,7 +748,7 @@ async fn update_mode(
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    Ok(Json(session_response(session, user_id)))
+    Ok(Json(session_response(session, &actor, None)))
 }
 
 async fn update_settings(
@@ -613,7 +757,8 @@ async fn update_settings(
     Path(session_id): Path<Uuid>,
     Json(body): Json<UpdateSettingsBody>,
 ) -> ApiResult<SessionResponse> {
-    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    let actor = user_actor_from_headers(&state, &headers).await?;
+    let user_id = actor.user_id().expect("user actor should have user id");
     get_host_session(&state, session_id, user_id).await?;
     if let Some(allow_guest_playlist_adds) = body.allow_guest_playlist_adds {
         db::party::set_allow_guest_playlist_adds(
@@ -648,7 +793,7 @@ async fn update_settings(
     }
 
     let updated = get_existing_session(&state, session_id).await?;
-    Ok(Json(session_response(updated, user_id)))
+    Ok(Json(session_response(updated, &actor, None)))
 }
 
 async fn search_queue_tracks(
@@ -657,8 +802,11 @@ async fn search_queue_tracks(
     Path(session_id): Path<Uuid>,
     Query(query): Query<SearchQueueQuery>,
 ) -> ApiResult<TrackSearchResponse> {
-    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
-    get_existing_session(&state, session_id).await?;
+    let actor = actor_from_headers(&state, &headers).await?;
+    let session = get_existing_session(&state, session_id).await?;
+    if !actor.can_access_session(session.id) {
+        return Err(err(StatusCode::FORBIDDEN, "not your party session"));
+    }
 
     let term = query.q.trim();
     let scope = query.scope.unwrap_or_else(|| "local".to_string());
@@ -669,7 +817,10 @@ async fn search_queue_tracks(
         }));
     }
 
-    let access_token = get_access_token(&state, user_id).await?;
+    let access_token = match &actor {
+        PartyActor::User { id, .. } => get_access_token(&state, *id).await?,
+        PartyActor::Guest { .. } => get_access_token(&state, session.host_user_id).await?,
+    };
     let results = if scope == "spotify" {
         spotify::playlist::search_tracks(&access_token, term)
             .await
@@ -687,16 +838,21 @@ async fn search_queue_tracks(
             })
             .collect()
     } else {
-        search_user_playlist_tracks(&access_token, term)
-            .await
-            .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?
+        match &actor {
+            PartyActor::User { .. } => search_user_playlist_tracks(&access_token, term)
+                .await
+                .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?,
+            PartyActor::Guest { .. } => search_party_cached_tracks(&state, session_id, term).await?,
+        }
     };
     let playlists = if scope == "spotify" {
         Vec::new()
-    } else {
+    } else if matches!(actor, PartyActor::User { .. }) {
         search_user_playlists(&access_token, term)
             .await
             .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?
+    } else {
+        Vec::new()
     };
 
     Ok(Json(TrackSearchResponse { results, playlists }))
@@ -708,8 +864,11 @@ async fn add_queue_track(
     Path(session_id): Path<Uuid>,
     Json(body): Json<AddQueueTrackBody>,
 ) -> ApiResult<QueueResponse> {
-    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    let actor = actor_from_headers(&state, &headers).await?;
     let session = get_existing_session(&state, session_id).await?;
+    if !actor.can_access_session(session.id) {
+        return Err(err(StatusCode::FORBIDDEN, "not your party session"));
+    }
     if !session.is_active {
         return Err(err(StatusCode::GONE, "party session has ended"));
     }
@@ -730,7 +889,8 @@ async fn add_queue_track(
         &db::party::NewPartyQueueItem {
             session_id,
             position,
-            added_by_user_id: Some(user_id),
+            added_by_user_id: actor.user_id(),
+            added_by_guest_id: actor.guest_id(),
             track: track.clone(),
         },
     )
@@ -738,13 +898,19 @@ async fn add_queue_track(
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     if session.add_added_tracks_to_source {
-        db::party::defer_source_queue_track(&state.pool, session_id, &track, user_id)
+        db::party::defer_source_queue_track(
+            &state.pool,
+            session_id,
+            &track,
+            actor.user_id(),
+            actor.guest_id(),
+        )
             .await
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
 
     if session.mode == db::party::PartyMode::VotedQueue.as_str() {
-        db::party::vote_queue_item(&state.pool, session_id, item.id, user_id)
+        db::party::vote_queue_item(&state.pool, session_id, item.id, actor.user_id(), actor.guest_id())
             .await
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
         db::party::sort_voted_queue(&state.pool, session_id)
@@ -752,7 +918,7 @@ async fn add_queue_track(
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
 
-    Ok(Json(build_queue_response(&state, session_id, user_id).await?))
+    Ok(Json(build_queue_response(&state, session_id, &actor).await?))
 }
 
 async fn add_queue_playlist(
@@ -761,7 +927,8 @@ async fn add_queue_playlist(
     Path(session_id): Path<Uuid>,
     Json(body): Json<AddQueuePlaylistBody>,
 ) -> ApiResult<QueueResponse> {
-    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    let actor = user_actor_from_headers(&state, &headers).await?;
+    let user_id = actor.user_id().expect("user actor should have user id");
     let session = get_playlist_adder_session(&state, session_id, user_id).await?;
     if !session.is_active {
         return Err(err(StatusCode::GONE, "party session has ended"));
@@ -790,14 +957,14 @@ async fn add_queue_playlist(
 
     let mut tracks = tracks;
     weave::session::shuffle(&mut tracks);
-    db::party::append_source_queue_items(&state.pool, session_id, &tracks, user_id)
+    db::party::append_source_queue_items(&state.pool, session_id, &tracks, Some(user_id), None)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     db::party::refill_queue_from_source(&state.pool, session_id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    Ok(Json(build_queue_response(&state, session_id, user_id).await?))
+    Ok(Json(build_queue_response(&state, session_id, &actor).await?))
 }
 
 async fn get_source_queue(
@@ -805,7 +972,10 @@ async fn get_source_queue(
     headers: HeaderMap,
     Path(session_id): Path<Uuid>,
 ) -> ApiResult<SourceQueueResponse> {
-    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    let user_id = user_actor_from_headers(&state, &headers)
+        .await?
+        .user_id()
+        .expect("user actor should have user id");
     get_host_session(&state, session_id, user_id).await?;
     Ok(Json(build_source_queue_response(&state, session_id).await?))
 }
@@ -816,7 +986,10 @@ async fn set_source_queue_item_disabled(
     Path((session_id, item_id)): Path<(Uuid, Uuid)>,
     Json(body): Json<SourceQueueDisabledBody>,
 ) -> ApiResult<SourceQueueResponse> {
-    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    let user_id = user_actor_from_headers(&state, &headers)
+        .await?
+        .user_id()
+        .expect("user actor should have user id");
     get_host_session(&state, session_id, user_id).await?;
 
     db::party::set_source_queue_item_disabled(&state.pool, session_id, item_id, body.disabled)
@@ -835,8 +1008,8 @@ async fn reorder_queue(
     Path(session_id): Path<Uuid>,
     Json(body): Json<ReorderQueueBody>,
 ) -> ApiResult<QueueResponse> {
-    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
-    let session = get_queue_editor_session(&state, session_id, user_id).await?;
+    let actor = actor_from_headers(&state, &headers).await?;
+    let session = get_queue_editor_session(&state, session_id, &actor).await?;
 
     if session.mode == db::party::PartyMode::VotedQueue.as_str() {
         let pin_position = i32::try_from(body.to_position).unwrap_or(i32::MAX);
@@ -863,7 +1036,7 @@ async fn reorder_queue(
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
 
-    Ok(Json(build_queue_response(&state, session_id, user_id).await?))
+    Ok(Json(build_queue_response(&state, session_id, &actor).await?))
 }
 
 async fn remove_queue_track(
@@ -872,10 +1045,8 @@ async fn remove_queue_track(
     Path(session_id): Path<Uuid>,
     Json(body): Json<RemoveQueueTrackBody>,
 ) -> ApiResult<QueueResponse> {
-    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
-    get_queue_editor_session(&state, session_id, user_id).await?;
-
-    let session = get_queue_editor_session(&state, session_id, user_id).await?;
+    let actor = actor_from_headers(&state, &headers).await?;
+    let session = get_queue_editor_session(&state, session_id, &actor).await?;
 
     db::party::remove_queue_item(&state.pool, session_id, body.item_id)
         .await
@@ -890,7 +1061,7 @@ async fn remove_queue_track(
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
 
-    Ok(Json(build_queue_response(&state, session_id, user_id).await?))
+    Ok(Json(build_queue_response(&state, session_id, &actor).await?))
 }
 
 async fn vote_queue_item(
@@ -899,15 +1070,18 @@ async fn vote_queue_item(
     Path((session_id, item_id)): Path<(Uuid, Uuid)>,
     Json(body): Json<VoteQueueItemBody>,
 ) -> ApiResult<QueueResponse> {
-    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
-    get_existing_session(&state, session_id).await?;
+    let actor = actor_from_headers(&state, &headers).await?;
+    let session = get_existing_session(&state, session_id).await?;
+    if !actor.can_access_session(session.id) {
+        return Err(err(StatusCode::FORBIDDEN, "not your party session"));
+    }
 
     if body.vote {
-        db::party::vote_queue_item(&state.pool, session_id, item_id, user_id)
+        db::party::vote_queue_item(&state.pool, session_id, item_id, actor.user_id(), actor.guest_id())
             .await
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     } else {
-        db::party::unvote_queue_item(&state.pool, session_id, item_id, user_id)
+        db::party::unvote_queue_item(&state.pool, session_id, item_id, actor.user_id(), actor.guest_id())
             .await
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
@@ -916,7 +1090,7 @@ async fn vote_queue_item(
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    Ok(Json(build_queue_response(&state, session_id, user_id).await?))
+    Ok(Json(build_queue_response(&state, session_id, &actor).await?))
 }
 
 async fn unvote_queue_item(
@@ -924,17 +1098,20 @@ async fn unvote_queue_item(
     headers: HeaderMap,
     Path((session_id, item_id)): Path<(Uuid, Uuid)>,
 ) -> ApiResult<QueueResponse> {
-    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
-    get_existing_session(&state, session_id).await?;
+    let actor = actor_from_headers(&state, &headers).await?;
+    let session = get_existing_session(&state, session_id).await?;
+    if !actor.can_access_session(session.id) {
+        return Err(err(StatusCode::FORBIDDEN, "not your party session"));
+    }
 
-    db::party::unvote_queue_item(&state.pool, session_id, item_id, user_id)
+    db::party::unvote_queue_item(&state.pool, session_id, item_id, actor.user_id(), actor.guest_id())
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     db::party::sort_voted_queue(&state.pool, session_id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    Ok(Json(build_queue_response(&state, session_id, user_id).await?))
+    Ok(Json(build_queue_response(&state, session_id, &actor).await?))
 }
 
 async fn unpin_queue_item(
@@ -942,7 +1119,10 @@ async fn unpin_queue_item(
     headers: HeaderMap,
     Path((session_id, item_id)): Path<(Uuid, Uuid)>,
 ) -> ApiResult<QueueResponse> {
-    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    let user_id = user_actor_from_headers(&state, &headers)
+        .await?
+        .user_id()
+        .expect("user actor should have user id");
     get_host_session(&state, session_id, user_id).await?;
 
     db::party::clear_queue_item_pin(&state.pool, session_id, item_id)
@@ -952,7 +1132,11 @@ async fn unpin_queue_item(
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    Ok(Json(build_queue_response(&state, session_id, user_id).await?))
+    let actor = PartyActor::User {
+        id: user_id,
+        display_name: String::new(),
+    };
+    Ok(Json(build_queue_response(&state, session_id, &actor).await?))
 }
 
 async fn get_export_preview(
@@ -961,8 +1145,11 @@ async fn get_export_preview(
     Path(session_id): Path<Uuid>,
     Query(query): Query<ExportQuery>,
 ) -> ApiResult<ExportPreviewResponse> {
-    crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
-    get_existing_session(&state, session_id).await?;
+    let actor = actor_from_headers(&state, &headers).await?;
+    let session = get_existing_session(&state, session_id).await?;
+    if !actor.can_access_session(session.id) {
+        return Err(err(StatusCode::FORBIDDEN, "not your party session"));
+    }
     let mode = normalize_export_mode(query.mode.as_deref());
     let items = build_export_items(&state, session_id, mode).await?;
 
@@ -978,8 +1165,14 @@ async fn export_playlist(
     Path(session_id): Path<Uuid>,
     Json(body): Json<ExportPlaylistBody>,
 ) -> ApiResult<ExportPlaylistResponse> {
-    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
-    get_existing_session(&state, session_id).await?;
+    let user_id = user_actor_from_headers(&state, &headers)
+        .await?
+        .user_id()
+        .expect("user actor should have user id");
+    let session = get_existing_session(&state, session_id).await?;
+    if session.host_user_id != user_id {
+        return Err(err(StatusCode::FORBIDDEN, "Spotify export requires a signed-in host"));
+    }
     let mode = normalize_export_mode(body.mode.as_deref());
     let items = build_export_items(&state, session_id, mode).await?;
     if items.is_empty() {
@@ -1021,8 +1214,11 @@ async fn export_csv(
     Path(session_id): Path<Uuid>,
     Query(query): Query<ExportQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<Value>)> {
-    crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
-    get_existing_session(&state, session_id).await?;
+    let actor = actor_from_headers(&state, &headers).await?;
+    let session = get_existing_session(&state, session_id).await?;
+    if !actor.can_access_session(session.id) {
+        return Err(err(StatusCode::FORBIDDEN, "not your party session"));
+    }
     let mode = normalize_export_mode(query.mode.as_deref());
     let items = build_export_items(&state, session_id, mode).await?;
     let csv = export_items_csv(&items);
@@ -1048,7 +1244,10 @@ async fn get_library_tracks(
     const DEFAULT_LIMIT: usize = 1_500;
     const MAX_LIMIT: usize = 3_000;
 
-    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    let user_id = user_actor_from_headers(&state, &headers)
+        .await?
+        .user_id()
+        .expect("user actor should have user id");
     let access_token = get_access_token(&state, user_id).await?;
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
     let playlists = user_playlists(&access_token)
@@ -1068,7 +1267,10 @@ async fn end_session(
     headers: HeaderMap,
     Path(session_id): Path<Uuid>,
 ) -> ApiResult<Value> {
-    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    let user_id = user_actor_from_headers(&state, &headers)
+        .await?
+        .user_id()
+        .expect("user actor should have user id");
     get_host_session(&state, session_id, user_id).await?;
 
     db::party::end_session(&state.pool, session_id)
@@ -1085,7 +1287,13 @@ async fn get_track(
     headers: HeaderMap,
     Path(uri): Path<String>,
 ) -> ApiResult<TrackResponse> {
-    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    let actor = actor_from_headers(&state, &headers).await?;
+    let user_id = match actor {
+        PartyActor::User { id, .. } => id,
+        PartyActor::Guest { session_id, .. } => {
+            get_existing_session(&state, session_id).await?.host_user_id
+        }
+    };
     let access_token = get_access_token(&state, user_id).await?;
 
     let track_id = uri
@@ -1108,7 +1316,7 @@ async fn get_track(
 async fn build_queue_response(
     state: &AppState,
     session_id: Uuid,
-    user_id: Uuid,
+    actor: &PartyActor,
 ) -> Result<QueueResponse, (StatusCode, Json<Value>)> {
     let items = db::party::queue_items(&state.pool, session_id)
         .await
@@ -1121,7 +1329,11 @@ async fn build_queue_response(
     let mut vote_map: HashMap<Uuid, Vec<VoterResponse>> = HashMap::new();
     for vote in raw_votes {
         vote_map.entry(vote.queue_item_id).or_default().push(VoterResponse {
-            user_id: vote.user_id,
+            user_id: vote
+                .user_id
+                .or(vote.guest_id)
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
             display_name: vote.display_name,
         });
     }
@@ -1132,7 +1344,8 @@ async fn build_queue_response(
         .map(|(position, item)| {
             let voters = vote_map.get(&item.id).cloned().unwrap_or_default();
             let vote_count = voters.len() as i64;
-            let user_voted = voters.iter().any(|v| v.user_id == user_id);
+            let actor_id = actor.voter_id();
+            let user_voted = voters.iter().any(|v| v.user_id == actor_id);
             QueueItemResponse {
                 id: item.id,
                 uri: item.track.uri.clone(),
@@ -1387,9 +1600,56 @@ async fn seed_source_playlist(
     }
 
     weave::session::shuffle(&mut tracks);
-    db::party::append_source_queue_items(&state.pool, session_id, &tracks, user_id)
+    db::party::append_source_queue_items(&state.pool, session_id, &tracks, Some(user_id), None)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
+async fn search_party_cached_tracks(
+    state: &AppState,
+    session_id: Uuid,
+    term: &str,
+) -> Result<Vec<TrackSearchResultResponse>, (StatusCode, Json<Value>)> {
+    let needle = term.to_lowercase();
+    let mut seen = HashSet::new();
+    let mut results = Vec::new();
+
+    let source_items = db::party::source_queue_items(&state.pool, session_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let queue_items = db::party::queue_items(&state.pool, session_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    for track in source_items
+        .into_iter()
+        .map(|item| item.track.0)
+        .chain(queue_items.into_iter().map(|item| item.track.0))
+    {
+        let name = track.name.as_deref().unwrap_or("");
+        let artist = track.artist.as_deref().unwrap_or("");
+        if !name.to_lowercase().contains(&needle) && !artist.to_lowercase().contains(&needle) {
+            continue;
+        }
+        if !seen.insert(track.uri.clone()) {
+            continue;
+        }
+        results.push(TrackSearchResultResponse {
+            uri: track.uri,
+            name: track.name,
+            artist: track.artist,
+            album_art_url: track.album_art_url,
+            duration_ms: track.duration_ms,
+            playlist_index: None,
+            playlist_id: None,
+            playlist_name: None,
+        });
+        if results.len() >= 20 {
+            break;
+        }
+    }
+
+    Ok(results)
 }
 
 async fn search_user_playlist_tracks(
@@ -1511,13 +1771,17 @@ async fn get_host_session(
 async fn get_queue_editor_session(
     state: &AppState,
     session_id: Uuid,
-    user_id: Uuid,
+    actor: &PartyActor,
 ) -> Result<db::party::PartySession, (StatusCode, Json<Value>)> {
     let session = get_existing_session(state, session_id).await?;
+    if !actor.can_access_session(session.id) {
+        return Err(err(StatusCode::FORBIDDEN, "not your party session"));
+    }
     if !session.is_active {
         return Err(err(StatusCode::GONE, "party session has ended"));
     }
-    if session.host_user_id == user_id || session.mode == db::party::PartyMode::SharedQueue.as_str()
+    if actor.user_id() == Some(session.host_user_id)
+        || session.mode == db::party::PartyMode::SharedQueue.as_str()
     {
         return Ok(session);
     }
@@ -1538,8 +1802,12 @@ async fn get_playlist_adder_session(
     Err(err(StatusCode::FORBIDDEN, "host controls only"))
 }
 
-fn session_response(session: db::party::PartySession, user_id: Uuid) -> SessionResponse {
-    let is_host = session.host_user_id == user_id;
+fn session_response(
+    session: db::party::PartySession,
+    actor: &PartyActor,
+    session_token: Option<String>,
+) -> SessionResponse {
+    let is_host = actor.user_id() == Some(session.host_user_id);
     SessionResponse {
         id: session.id,
         host_user_id: session.host_user_id,
@@ -1551,6 +1819,9 @@ fn session_response(session: db::party::PartySession, user_id: Uuid) -> SessionR
         show_queue_attribution: session.show_queue_attribution,
         current_track_uri: session.current_track_uri,
         is_host,
+        is_guest: actor.is_guest(),
+        display_name: Some(actor.display_name().to_string()),
+        session_token,
     }
 }
 

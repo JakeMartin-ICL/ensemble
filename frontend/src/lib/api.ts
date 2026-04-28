@@ -2,8 +2,9 @@ const _apiUrl = import.meta.env.VITE_API_URL as string | undefined
 if (!_apiUrl) throw new Error('VITE_API_URL is not set')
 const BASE_URL: string = _apiUrl
 
-function authHeaders(): Record<string, string> {
-  const token = localStorage.getItem('session_token')
+function authHeaders(path: string): Record<string, string> {
+  const partyGuestToken = path.startsWith('/party') ? localStorage.getItem('party_guest_session_token') : null
+  const token = partyGuestToken ?? localStorage.getItem('session_token')
   return token ? { Authorization: `Bearer ${token}` } : {}
 }
 
@@ -27,7 +28,7 @@ export async function post<T>(
 ): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders(), ...headers },
+    headers: { 'Content-Type': 'application/json', ...authHeaders(path), ...headers },
     body: JSON.stringify(body),
   })
   if (!res.ok) throw new Error(await errorMessage(res))
@@ -35,13 +36,13 @@ export async function post<T>(
 }
 
 export async function get<T>(path: string, headers?: Record<string, string>): Promise<T> {
-  const res = await fetch(`${BASE_URL}${path}`, { headers: { ...authHeaders(), ...headers } })
+  const res = await fetch(`${BASE_URL}${path}`, { headers: { ...authHeaders(path), ...headers } })
   if (!res.ok) throw new Error(await errorMessage(res))
   return res.json() as Promise<T>
 }
 
 export async function getBlob(path: string, headers?: Record<string, string>): Promise<Blob> {
-  const res = await fetch(`${BASE_URL}${path}`, { headers: { ...authHeaders(), ...headers } })
+  const res = await fetch(`${BASE_URL}${path}`, { headers: { ...authHeaders(path), ...headers } })
   if (!res.ok) throw new Error(await errorMessage(res))
   return res.blob()
 }
@@ -49,7 +50,7 @@ export async function getBlob(path: string, headers?: Record<string, string>): P
 export async function del<T>(path: string, headers?: Record<string, string>): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
     method: 'DELETE',
-    headers: { ...authHeaders(), ...headers },
+    headers: { ...authHeaders(path), ...headers },
   })
   if (!res.ok) throw new Error(await errorMessage(res))
   return res.json() as Promise<T>

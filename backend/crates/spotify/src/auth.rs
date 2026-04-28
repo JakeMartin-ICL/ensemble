@@ -45,6 +45,37 @@ pub async fn exchange_code(
     })
 }
 
+pub async fn exchange_code_pkce(
+    code: &str,
+    client_id: &str,
+    code_verifier: &str,
+    redirect_uri: &str,
+) -> anyhow::Result<TokenResponse> {
+    let params = [
+        ("grant_type", "authorization_code"),
+        ("code", code),
+        ("redirect_uri", redirect_uri),
+        ("client_id", client_id),
+        ("code_verifier", code_verifier),
+    ];
+    let raw = reqwest::Client::new()
+        .post("https://accounts.spotify.com/api/token")
+        .form(&params)
+        .send()
+        .await
+        .context("sending PKCE token request")?
+        .error_for_status()
+        .context("Spotify token endpoint returned error")?
+        .json::<RawTokenResponse>()
+        .await
+        .context("parsing PKCE token response")?;
+    Ok(TokenResponse {
+        access_token: raw.access_token,
+        refresh_token: raw.refresh_token,
+        expires_in: raw.expires_in,
+    })
+}
+
 pub async fn refresh_token(
     refresh_token: &str,
     client_id: &str,
@@ -66,6 +97,33 @@ pub async fn refresh_token(
         .json::<RawTokenResponse>()
         .await
         .context("parsing refresh response")?;
+    Ok(TokenResponse {
+        access_token: raw.access_token,
+        refresh_token: raw.refresh_token,
+        expires_in: raw.expires_in,
+    })
+}
+
+pub async fn refresh_token_pkce(
+    refresh_token: &str,
+    client_id: &str,
+) -> anyhow::Result<TokenResponse> {
+    let params = [
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token),
+        ("client_id", client_id),
+    ];
+    let raw = reqwest::Client::new()
+        .post("https://accounts.spotify.com/api/token")
+        .form(&params)
+        .send()
+        .await
+        .context("sending PKCE refresh request")?
+        .error_for_status()
+        .context("Spotify token endpoint returned error")?
+        .json::<RawTokenResponse>()
+        .await
+        .context("parsing PKCE refresh response")?;
     Ok(TokenResponse {
         access_token: raw.access_token,
         refresh_token: raw.refresh_token,

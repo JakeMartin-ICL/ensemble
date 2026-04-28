@@ -16,8 +16,6 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub struct AppState {
     pub pool: db::PgPool,
-    pub spotify_client_id: String,
-    pub spotify_client_secret: String,
     pub spotify_redirect_uri: String,
     pub heartbeat_tasks: Arc<DashMap<Uuid, AbortHandle>>,
 }
@@ -37,10 +35,6 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState {
         pool,
-        spotify_client_id: std::env::var("SPOTIFY_CLIENT_ID")
-            .context("SPOTIFY_CLIENT_ID must be set")?,
-        spotify_client_secret: std::env::var("SPOTIFY_CLIENT_SECRET")
-            .context("SPOTIFY_CLIENT_SECRET must be set")?,
         spotify_redirect_uri: std::env::var("SPOTIFY_REDIRECT_URI")
             .context("SPOTIFY_REDIRECT_URI must be set")?,
         heartbeat_tasks: Arc::new(DashMap::new()),

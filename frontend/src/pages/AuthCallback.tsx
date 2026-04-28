@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { post } from '../lib/api'
+import { clearPendingSpotifyAuth, getPendingSpotifyAuth, setStoredSpotifyClientId } from '../lib/spotifyAuth'
 
 interface CallbackResponse {
   user_id: string
@@ -17,24 +18,34 @@ export default function AuthCallback() {
     const params = new URLSearchParams(window.location.search)
     const code = params.get('code')
     const state = params.get('state')
-    const storedState = sessionStorage.getItem('spotify_state')
+    const pending = getPendingSpotifyAuth()
 
     if (!code || !state) {
       setError('Missing code or state parameter from Spotify')
       return
     }
 
-    if (!storedState) return // Already consumed (StrictMode double-invoke in dev)
+    if (!pending.state) return // Already consumed (StrictMode double-invoke in dev)
 
-    if (state !== storedState) {
+    if (state !== pending.state) {
       setError('State mismatch — possible CSRF attempt')
       return
     }
 
-    sessionStorage.removeItem('spotify_state')
+    if (!pending.clientId || !pending.codeVerifier) {
+      setError('Missing Spotify login setup. Start the Spotify connection again.')
+      return
+    }
 
-    void post<CallbackResponse>('/auth/callback', { code })
+    clearPendingSpotifyAuth()
+
+    void post<CallbackResponse>('/auth/callback', {
+      code,
+      client_id: pending.clientId,
+      code_verifier: pending.codeVerifier,
+    })
       .then((data) => {
+        setStoredSpotifyClientId(pending.clientId ?? '')
         localStorage.setItem('user_id', data.user_id)
         localStorage.setItem('session_token', data.session_token)
         void navigate('/')

@@ -196,11 +196,13 @@ async fn get_access_token(
         .signed_duration_since(chrono::Utc::now())
         < chrono::Duration::seconds(60)
     {
-        let tokens = spotify::auth::refresh_token(
-            &user.refresh_token,
-            &state.spotify_client_id,
-            &state.spotify_client_secret,
-        )
+        let client_id = user.spotify_client_id.as_deref().ok_or_else(|| {
+            err(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Spotify client ID is missing; reconnect Spotify",
+            )
+        })?;
+        let tokens = spotify::auth::refresh_token_pkce(&user.refresh_token, client_id)
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
 
@@ -220,8 +222,6 @@ fn spawn_heartbeat(state: &AppState, session_id: Uuid) {
     let params = weave::heartbeat::HeartbeatParams {
         session_id,
         pool: state.pool.clone(),
-        spotify_client_id: state.spotify_client_id.clone(),
-        spotify_client_secret: state.spotify_client_secret.clone(),
     };
 
     let fut = weave::heartbeat::run(params);

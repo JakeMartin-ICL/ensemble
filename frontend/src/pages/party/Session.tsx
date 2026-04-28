@@ -42,6 +42,7 @@ import styles from '../../styles/Mode.module.css'
 
 const PARTY_SESSION_KEY = 'party_session_id'
 const PARTY_GUEST_SESSION_KEY = 'party_guest_session_id'
+const PARTY_GUEST_TOKEN_KEY = 'party_guest_session_token'
 
 interface ObservedPlayback extends PlaybackState {
   observed_at: number
@@ -409,6 +410,7 @@ export default function PartySessionPage() {
       .then(() => {
         localStorage.removeItem(PARTY_SESSION_KEY)
         localStorage.removeItem(PARTY_GUEST_SESSION_KEY)
+        localStorage.removeItem(PARTY_GUEST_TOKEN_KEY)
         void navigate('/party')
       })
       .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
@@ -744,6 +746,7 @@ export default function PartySessionPage() {
           onClick={() => {
             localStorage.removeItem(PARTY_SESSION_KEY)
             localStorage.removeItem(PARTY_GUEST_SESSION_KEY)
+            localStorage.removeItem(PARTY_GUEST_TOKEN_KEY)
             void navigate('/party')
           }}
           type="button"
@@ -901,17 +904,30 @@ function PartyQueuePanel({
       return
     }
 
-    onLoadLibrary()
     setSearchingLocal(true)
     setSpotifyResults(null)
     const timer = window.setTimeout(() => {
-      setLocalResults(searchLoadedLibrary(libraryTracks, term, 20))
-      setPlaylistResults(canAddPlaylists ? searchLoadedPlaylists(libraryPlaylists, term, 10) : [])
-      setSearchingLocal(false)
+      if (session.is_guest) {
+        void searchPartyTracks(sessionId, term, 'local')
+          .then((response) => {
+            setLocalResults(response.results)
+            setPlaylistResults([])
+          })
+          .catch(() => {
+            setLocalResults([])
+            setPlaylistResults([])
+          })
+          .finally(() => { setSearchingLocal(false) })
+      } else {
+        onLoadLibrary()
+        setLocalResults(searchLoadedLibrary(libraryTracks, term, 20))
+        setPlaylistResults(canAddPlaylists ? searchLoadedPlaylists(libraryPlaylists, term, 10) : [])
+        setSearchingLocal(false)
+      }
     }, 180)
 
     return () => { window.clearTimeout(timer) }
-  }, [canAddPlaylists, libraryPlaylists, libraryTracks, onLoadLibrary, query])
+  }, [canAddPlaylists, libraryPlaylists, libraryTracks, onLoadLibrary, query, session.is_guest, sessionId])
 
   function handleSearchSpotify() {
     const term = query.trim()

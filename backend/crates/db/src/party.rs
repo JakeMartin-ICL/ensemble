@@ -39,6 +39,7 @@ pub struct PartyQueueItem {
     pub pin_position: Option<i32>,
     pub track: Json<PartyTrack>,
     pub added_by_user_id: Option<Uuid>,
+    pub added_by_guest_id: Option<Uuid>,
     pub added_by_display_name: Option<String>,
     pub created_at: DateTime<Utc>,
 }
@@ -46,7 +47,8 @@ pub struct PartyQueueItem {
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct PartyQueueVote {
     pub queue_item_id: Uuid,
-    pub user_id: Uuid,
+    pub user_id: Option<Uuid>,
+    pub guest_id: Option<Uuid>,
     pub display_name: Option<String>,
 }
 
@@ -58,6 +60,7 @@ pub struct PartySourceQueueItem {
     pub disabled: bool,
     pub track: Json<PartyTrack>,
     pub added_by_user_id: Option<Uuid>,
+    pub added_by_guest_id: Option<Uuid>,
     pub added_by_display_name: Option<String>,
     pub created_at: DateTime<Utc>,
 }
@@ -69,6 +72,7 @@ pub struct PartyPlayedTrack {
     pub play_order: i32,
     pub track: Json<PartyTrack>,
     pub added_by_user_id: Option<Uuid>,
+    pub added_by_guest_id: Option<Uuid>,
     pub added_by_display_name: Option<String>,
     pub created_at: DateTime<Utc>,
 }
@@ -85,19 +89,21 @@ pub struct NewPartyQueueItem {
     pub position: i32,
     pub track: PartyTrack,
     pub added_by_user_id: Option<Uuid>,
-}
-
-pub struct NewPartySourceQueueItem {
-    pub session_id: Uuid,
-    pub position: i32,
-    pub track: PartyTrack,
-    pub added_by_user_id: Uuid,
+    pub added_by_guest_id: Option<Uuid>,
 }
 
 pub struct NewPartyPlayedTrack {
     pub session_id: Uuid,
     pub track: PartyTrack,
     pub added_by_user_id: Option<Uuid>,
+    pub added_by_guest_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct PartyGuest {
+    pub id: Uuid,
+    pub session_id: Uuid,
+    pub display_name: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,6 +215,49 @@ pub async fn get_session_by_room_code(
     .await
     .context("fetching party session by room code")?;
     Ok(session)
+}
+
+pub async fn create_guest_session(
+    pool: &PgPool,
+    session_id: Uuid,
+    display_name: &str,
+    token: &str,
+    expires_at: DateTime<Utc>,
+) -> anyhow::Result<PartyGuest> {
+    let guest = sqlx::query_as::<_, PartyGuest>(
+        r#"
+        INSERT INTO public.party_guests (session_id, display_name, token_hash, expires_at)
+        VALUES ($1, $2, encode(digest($3, 'sha256'), 'hex'), $4)
+        RETURNING id, session_id, display_name
+        "#,
+    )
+    .bind(session_id)
+    .bind(display_name)
+    .bind(token)
+    .bind(expires_at)
+    .fetch_one(pool)
+    .await
+    .context("creating party guest session")?;
+    Ok(guest)
+}
+
+pub async fn guest_for_session_token(
+    pool: &PgPool,
+    token: &str,
+) -> anyhow::Result<Option<PartyGuest>> {
+    let guest = sqlx::query_as::<_, PartyGuest>(
+        r#"
+        SELECT id, session_id, display_name
+        FROM public.party_guests
+        WHERE token_hash = encode(digest($1, 'sha256'), 'hex')
+          AND expires_at > now()
+        "#,
+    )
+    .bind(token)
+    .fetch_optional(pool)
+    .await
+    .context("fetching party guest session")?;
+    Ok(guest)
 }
 
 pub async fn deactivate_user_sessions(pool: &PgPool, host_user_id: Uuid) -> anyhow::Result<()> {
@@ -409,10 +458,10 @@ pub async fn add_played_track(
     let played = sqlx::query_as::<_, PartyPlayedTrack>(
         r#"
         INSERT INTO public.party_played_tracks (
-            session_id, play_order, track, added_by_user_id
+            session_id, play_order, track, added_by_user_id, added_by_guest_id
         )
-        VALUES ($1, $2, $3, $4)
-        RETURNING id, session_id, play_order, track, added_by_user_id,
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING id, session_id, play_order, track, added_by_user_id, added_by_guest_id,
                   NULL::text AS added_by_display_name, created_at
         "#,
     )
@@ -420,6 +469,7 @@ pub async fn add_played_track(
     .bind(play_order)
     .bind(Json(&item.track))
     .bind(item.added_by_user_id)
+    .bind(item.added_by_guest_id)
     .fetch_one(pool)
     .await
     .context("adding party played track")?;
@@ -432,10 +482,11 @@ pub async fn played_tracks(
 ) -> anyhow::Result<Vec<PartyPlayedTrack>> {
     let items = sqlx::query_as::<_, PartyPlayedTrack>(
         r#"
-        SELECT p.id, p.session_id, p.play_order, p.track, p.added_by_user_id,
-               u.display_name AS added_by_display_name, p.created_at
+        SELECT p.id, p.session_id, p.play_order, p.track, p.added_by_user_id, p.added_by_guest_id,
+               coalesce(u.display_name, g.display_name) AS added_by_display_name, p.created_at
         FROM public.party_played_tracks p
         LEFT JOIN public.users u ON u.id = p.added_by_user_id
+        LEFT JOIN public.party_guests g ON g.id = p.added_by_guest_id
         WHERE p.session_id = $1
         ORDER BY p.play_order ASC, p.created_at ASC
         "#,
@@ -450,10 +501,11 @@ pub async fn played_tracks(
 pub async fn queue_items(pool: &PgPool, session_id: Uuid) -> anyhow::Result<Vec<PartyQueueItem>> {
     let items = sqlx::query_as::<_, PartyQueueItem>(
         r#"
-        SELECT q.id, q.session_id, q.position, q.pin_position, q.track, q.added_by_user_id,
-               u.display_name AS added_by_display_name, q.created_at
+        SELECT q.id, q.session_id, q.position, q.pin_position, q.track, q.added_by_user_id, q.added_by_guest_id,
+               coalesce(u.display_name, g.display_name) AS added_by_display_name, q.created_at
         FROM public.party_queue_items q
         LEFT JOIN public.users u ON u.id = q.added_by_user_id
+        LEFT JOIN public.party_guests g ON g.id = q.added_by_guest_id
         WHERE q.session_id = $1
         ORDER BY q.position ASC, q.created_at ASC
         "#,
@@ -471,10 +523,11 @@ pub async fn first_queue_item(
 ) -> anyhow::Result<Option<PartyQueueItem>> {
     let item = sqlx::query_as::<_, PartyQueueItem>(
         r#"
-        SELECT q.id, q.session_id, q.position, q.pin_position, q.track, q.added_by_user_id,
-               u.display_name AS added_by_display_name, q.created_at
+        SELECT q.id, q.session_id, q.position, q.pin_position, q.track, q.added_by_user_id, q.added_by_guest_id,
+               coalesce(u.display_name, g.display_name) AS added_by_display_name, q.created_at
         FROM public.party_queue_items q
         LEFT JOIN public.users u ON u.id = q.added_by_user_id
+        LEFT JOIN public.party_guests g ON g.id = q.added_by_guest_id
         WHERE q.session_id = $1
         ORDER BY q.position ASC, q.created_at ASC
         LIMIT 1
@@ -529,9 +582,9 @@ pub async fn add_queue_item(
 ) -> anyhow::Result<PartyQueueItem> {
     let item = sqlx::query_as::<_, PartyQueueItem>(
         r#"
-        INSERT INTO public.party_queue_items (session_id, position, track, added_by_user_id)
-        VALUES ($1, $2, $3, $4)
-        RETURNING id, session_id, position, NULL::integer AS pin_position, track, added_by_user_id,
+        INSERT INTO public.party_queue_items (session_id, position, track, added_by_user_id, added_by_guest_id)
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING id, session_id, position, NULL::integer AS pin_position, track, added_by_user_id, added_by_guest_id,
                   NULL::text AS added_by_display_name, created_at
         "#,
     )
@@ -539,6 +592,7 @@ pub async fn add_queue_item(
     .bind(item.position)
     .bind(Json(&item.track))
     .bind(item.added_by_user_id)
+    .bind(item.added_by_guest_id)
     .fetch_one(pool)
     .await
     .context("adding party queue item")?;
@@ -551,10 +605,11 @@ pub async fn source_queue_items(
 ) -> anyhow::Result<Vec<PartySourceQueueItem>> {
     let items = sqlx::query_as::<_, PartySourceQueueItem>(
         r#"
-        SELECT s.id, s.session_id, s.position, s.disabled, s.track, s.added_by_user_id,
-               u.display_name AS added_by_display_name, s.created_at
+        SELECT s.id, s.session_id, s.position, s.disabled, s.track, s.added_by_user_id, s.added_by_guest_id,
+               coalesce(u.display_name, g.display_name) AS added_by_display_name, s.created_at
         FROM public.party_source_queue_items s
         LEFT JOIN public.users u ON u.id = s.added_by_user_id
+        LEFT JOIN public.party_guests g ON g.id = s.added_by_guest_id
         WHERE s.session_id = $1
         ORDER BY s.disabled ASC, (s.position < 0) ASC, s.position ASC, s.created_at ASC
         "#,
@@ -600,7 +655,8 @@ pub async fn add_source_queue_items(
     session_id: Uuid,
     start_position: i32,
     tracks: &[PartyTrack],
-    added_by_user_id: Uuid,
+    added_by_user_id: Option<Uuid>,
+    added_by_guest_id: Option<Uuid>,
 ) -> anyhow::Result<()> {
     let positions = tracks
         .iter()
@@ -620,20 +676,22 @@ pub async fn add_source_queue_items(
 
     sqlx::query(
         r#"
-        INSERT INTO public.party_source_queue_items (session_id, position, track, added_by_user_id)
-        SELECT $1, mapped.position, mapped.track, $4
+        INSERT INTO public.party_source_queue_items (session_id, position, track, added_by_user_id, added_by_guest_id)
+        SELECT $1, mapped.position, mapped.track, $4, $5
         FROM unnest($2::integer[], $3::jsonb[]) AS mapped(position, track)
         ON CONFLICT (session_id, (track->>'uri'))
         DO UPDATE SET
           position = EXCLUDED.position,
           track = EXCLUDED.track,
-          added_by_user_id = EXCLUDED.added_by_user_id
+          added_by_user_id = EXCLUDED.added_by_user_id,
+          added_by_guest_id = EXCLUDED.added_by_guest_id
         "#,
     )
     .bind(session_id)
     .bind(&positions)
     .bind(&track_json)
     .bind(added_by_user_id)
+    .bind(added_by_guest_id)
     .execute(pool)
     .await
     .context("adding party source queue items")?;
@@ -651,36 +709,48 @@ pub async fn append_source_queue_items(
     pool: &PgPool,
     session_id: Uuid,
     tracks: &[PartyTrack],
-    added_by_user_id: Uuid,
+    added_by_user_id: Option<Uuid>,
+    added_by_guest_id: Option<Uuid>,
 ) -> anyhow::Result<()> {
     let position = source_append_position(pool, session_id).await?;
-    add_source_queue_items(pool, session_id, position, tracks, added_by_user_id).await
+    add_source_queue_items(
+        pool,
+        session_id,
+        position,
+        tracks,
+        added_by_user_id,
+        added_by_guest_id,
+    )
+    .await
 }
 
 pub async fn defer_source_queue_track(
     pool: &PgPool,
     session_id: Uuid,
     track: &PartyTrack,
-    added_by_user_id: Uuid,
+    added_by_user_id: Option<Uuid>,
+    added_by_guest_id: Option<Uuid>,
 ) -> anyhow::Result<()> {
     let position = source_deferred_position(pool, session_id).await?;
     let track_json = serde_json::to_value(track).context("serializing deferred source track")?;
 
     sqlx::query(
         r#"
-        INSERT INTO public.party_source_queue_items (session_id, position, track, added_by_user_id)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO public.party_source_queue_items (session_id, position, track, added_by_user_id, added_by_guest_id)
+        VALUES ($1, $2, $3, $4, $5)
         ON CONFLICT (session_id, (track->>'uri'))
         DO UPDATE SET
           position = EXCLUDED.position,
           track = EXCLUDED.track,
-          added_by_user_id = EXCLUDED.added_by_user_id
+          added_by_user_id = EXCLUDED.added_by_user_id,
+          added_by_guest_id = EXCLUDED.added_by_guest_id
         "#,
     )
     .bind(session_id)
     .bind(position)
     .bind(track_json)
     .bind(added_by_user_id)
+    .bind(added_by_guest_id)
     .execute(pool)
     .await
     .context("deferring party source queue track")?;
@@ -699,7 +769,8 @@ pub async fn add_queue_items(
     session_id: Uuid,
     start_position: i32,
     tracks: &[PartyTrack],
-    added_by_user_id: Uuid,
+    added_by_user_id: Option<Uuid>,
+    added_by_guest_id: Option<Uuid>,
 ) -> anyhow::Result<()> {
     let positions = tracks
         .iter()
@@ -719,8 +790,8 @@ pub async fn add_queue_items(
 
     sqlx::query(
         r#"
-        INSERT INTO public.party_queue_items (session_id, position, track, added_by_user_id)
-        SELECT $1, mapped.position, mapped.track, $4
+        INSERT INTO public.party_queue_items (session_id, position, track, added_by_user_id, added_by_guest_id)
+        SELECT $1, mapped.position, mapped.track, $4, $5
         FROM unnest($2::integer[], $3::jsonb[]) AS mapped(position, track)
         "#,
     )
@@ -728,6 +799,7 @@ pub async fn add_queue_items(
     .bind(&positions)
     .bind(&track_json)
     .bind(added_by_user_id)
+    .bind(added_by_guest_id)
     .execute(pool)
     .await
     .context("adding party queue items")?;
@@ -816,7 +888,7 @@ pub async fn pop_next_queue_item(
             ORDER BY position ASC, created_at ASC
             LIMIT 1
         )
-        RETURNING id, session_id, position, NULL::integer AS pin_position, track, added_by_user_id,
+        RETURNING id, session_id, position, NULL::integer AS pin_position, track, added_by_user_id, added_by_guest_id,
                   NULL::text AS added_by_display_name, created_at
         "#,
     )
@@ -846,7 +918,7 @@ pub async fn remove_first_queue_item_by_uri(
             ORDER BY position ASC, created_at ASC
             LIMIT 1
         )
-        RETURNING id, session_id, position, NULL::integer AS pin_position, track, added_by_user_id,
+        RETURNING id, session_id, position, NULL::integer AS pin_position, track, added_by_user_id, added_by_guest_id,
                   NULL::text AS added_by_display_name, created_at
         "#,
     )
@@ -891,6 +963,7 @@ pub async fn refill_queue_from_source(pool: &PgPool, session_id: Uuid) -> anyhow
                 position,
                 track: source_item.track.0,
                 added_by_user_id: source_item.added_by_user_id,
+                added_by_guest_id: source_item.added_by_guest_id,
             },
         )
         .await?;
@@ -964,7 +1037,7 @@ async fn take_next_source_queue_item(
         SET position = deferred.position
         FROM next_item, deferred
         WHERE s.id = next_item.id
-        RETURNING s.id, s.session_id, s.position, s.disabled, s.track, s.added_by_user_id, NULL::text AS added_by_display_name, s.created_at
+        RETURNING s.id, s.session_id, s.position, s.disabled, s.track, s.added_by_user_id, s.added_by_guest_id, NULL::text AS added_by_display_name, s.created_at
         "#,
     )
     .bind(session_id)
@@ -1102,21 +1175,23 @@ pub async fn vote_queue_item(
     pool: &PgPool,
     session_id: Uuid,
     item_id: Uuid,
-    user_id: Uuid,
+    user_id: Option<Uuid>,
+    guest_id: Option<Uuid>,
 ) -> anyhow::Result<()> {
     sqlx::query(
         r#"
-        INSERT INTO public.party_queue_votes (queue_item_id, user_id)
-        SELECT $1, $2
+        INSERT INTO public.party_queue_votes (queue_item_id, user_id, guest_id)
+        SELECT $1, $2, $3
         WHERE EXISTS (
             SELECT 1 FROM public.party_queue_items
-            WHERE id = $1 AND session_id = $3
+            WHERE id = $1 AND session_id = $4
         )
-        ON CONFLICT (queue_item_id, user_id) DO NOTHING
+        ON CONFLICT DO NOTHING
         "#,
     )
     .bind(item_id)
     .bind(user_id)
+    .bind(guest_id)
     .bind(session_id)
     .execute(pool)
     .await
@@ -1128,21 +1203,26 @@ pub async fn unvote_queue_item(
     pool: &PgPool,
     session_id: Uuid,
     item_id: Uuid,
-    user_id: Uuid,
+    user_id: Option<Uuid>,
+    guest_id: Option<Uuid>,
 ) -> anyhow::Result<()> {
     sqlx::query(
         r#"
         DELETE FROM public.party_queue_votes
         WHERE queue_item_id = $1
-          AND user_id = $2
+          AND (
+            (user_id = $2 AND $2::uuid IS NOT NULL)
+            OR (guest_id = $3 AND $3::uuid IS NOT NULL)
+          )
           AND EXISTS (
               SELECT 1 FROM public.party_queue_items
-              WHERE id = $1 AND session_id = $3
+              WHERE id = $1 AND session_id = $4
           )
         "#,
     )
     .bind(item_id)
     .bind(user_id)
+    .bind(guest_id)
     .bind(session_id)
     .execute(pool)
     .await
@@ -1156,10 +1236,11 @@ pub async fn votes_for_queue_items(
 ) -> anyhow::Result<Vec<PartyQueueVote>> {
     let votes = sqlx::query_as::<_, PartyQueueVote>(
         r#"
-        SELECT v.queue_item_id, v.user_id, u.display_name
+        SELECT v.queue_item_id, v.user_id, v.guest_id, coalesce(u.display_name, g.display_name) AS display_name
         FROM public.party_queue_votes v
         JOIN public.party_queue_items qi ON qi.id = v.queue_item_id
         LEFT JOIN public.users u ON u.id = v.user_id
+        LEFT JOIN public.party_guests g ON g.id = v.guest_id
         WHERE qi.session_id = $1
         ORDER BY v.created_at ASC
         "#,

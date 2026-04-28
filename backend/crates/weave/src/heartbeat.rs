@@ -8,8 +8,6 @@ use uuid::Uuid;
 pub struct HeartbeatParams {
     pub session_id: Uuid,
     pub pool: PgPool,
-    pub spotify_client_id: String,
-    pub spotify_client_secret: String,
 }
 
 pub async fn run(params: HeartbeatParams) {
@@ -18,11 +16,7 @@ pub async fn run(params: HeartbeatParams) {
         pool: params.pool,
     };
 
-    playback::run(playback::HeartbeatParams {
-        driver,
-        spotify_client_id: params.spotify_client_id,
-        spotify_client_secret: params.spotify_client_secret,
-    })
+    playback::run(playback::HeartbeatParams { driver })
     .await;
 }
 

@@ -9,8 +9,6 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 pub struct HeartbeatParams<D> {
     pub driver: D,
-    pub spotify_client_id: String,
-    pub spotify_client_secret: String,
 }
 
 pub trait HeartbeatDriver: Send + Sync + 'static {
@@ -56,11 +54,7 @@ async fn run_inner<D>(params: HeartbeatParams<D>) -> anyhow::Result<()>
 where
     D: HeartbeatDriver,
 {
-    let HeartbeatParams {
-        driver,
-        spotify_client_id,
-        spotify_client_secret,
-    } = params;
+    let HeartbeatParams { driver } = params;
     let session_id = driver.session_id();
     let label = driver.label();
     let mut queued_for: Option<String> = None;
@@ -81,14 +75,7 @@ where
             .await?
             .ok_or_else(|| anyhow::anyhow!("{label} heartbeat: user not found"))?;
 
-        let access_token = maybe_refresh_token(
-            driver.pool(),
-            host_user_id,
-            &user,
-            &spotify_client_id,
-            &spotify_client_secret,
-        )
-        .await?;
+        let access_token = maybe_refresh_token(driver.pool(), host_user_id, &user).await?;
 
         let playback = match spotify::player::get_playback_state(&access_token).await {
             Ok(Some(p)) => p,
@@ -157,8 +144,6 @@ async fn maybe_refresh_token(
     pool: &PgPool,
     user_id: Uuid,
     user: &db::users::User,
-    client_id: &str,
-    client_secret: &str,
 ) -> anyhow::Result<String> {
     if user
         .token_expires_at
@@ -168,8 +153,11 @@ async fn maybe_refresh_token(
         return Ok(user.access_token.clone());
     }
 
-    let tokens =
-        spotify::auth::refresh_token(&user.refresh_token, client_id, client_secret).await?;
+    let client_id = user
+        .spotify_client_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("Spotify client ID is missing; reconnect Spotify"))?;
+    let tokens = spotify::auth::refresh_token_pkce(&user.refresh_token, client_id).await?;
     let new_expires_at = chrono::Utc::now() + chrono::Duration::seconds(tokens.expires_in as i64);
     db::users::update_tokens(pool, user_id, &tokens.access_token, new_expires_at).await?;
     Ok(tokens.access_token)
