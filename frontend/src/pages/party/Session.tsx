@@ -52,6 +52,8 @@ export default function PartySessionPage() {
   const [libraryLoading, setLibraryLoading] = useState(false)
   const [now, setNow] = useState(() => Date.now())
   const [copiedCode, setCopiedCode] = useState(false)
+  const [modeOpen, setModeOpen] = useState(false)
+  const [modeVisible, setModeVisible] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settingsVisible, setSettingsVisible] = useState(false)
   const [savingMode, setSavingMode] = useState<PartyMode | null>(null)
@@ -62,6 +64,8 @@ export default function PartySessionPage() {
   const [duplicatePulse, setDuplicatePulse] = useState<{ itemId: string; token: number } | null>(null)
   const duplicatePulseTokenRef = useRef(0)
   const pendingRemovedIdsRef = useRef<Set<string>>(new Set())
+  const modeButtonRef = useRef<HTMLButtonElement | null>(null)
+  const modePanelRef = useRef<HTMLDivElement | null>(null)
   const settingsButtonRef = useRef<HTMLButtonElement | null>(null)
   const settingsPanelRef = useRef<HTMLDivElement | null>(null)
   const navigate = useNavigate()
@@ -169,20 +173,25 @@ export default function PartySessionPage() {
   }, [])
 
   useEffect(() => {
-    if (!settingsOpen) return
+    if (!modeOpen && !settingsOpen) return
 
     function handlePointerDown(e: PointerEvent) {
       const target = e.target as Node
+      const clickedModeButton = modeButtonRef.current?.contains(target) ?? false
+      const clickedModePanel = modePanelRef.current?.contains(target) ?? false
       const clickedButton = settingsButtonRef.current?.contains(target) ?? false
       const clickedPanel = settingsPanelRef.current?.contains(target) ?? false
-      if (!clickedButton && !clickedPanel) {
+      if (modeOpen && !clickedModeButton && !clickedModePanel) {
+        closeMode()
+      }
+      if (settingsOpen && !clickedButton && !clickedPanel) {
         closeSettings()
       }
     }
 
     document.addEventListener('pointerdown', handlePointerDown)
     return () => { document.removeEventListener('pointerdown', handlePointerDown) }
-  }, [settingsOpen])
+  }, [modeOpen, settingsOpen])
 
   useEffect(() => {
     if (!session?.is_host || !session.id) return
@@ -385,12 +394,28 @@ export default function PartySessionPage() {
       return
     }
 
+    closeMode()
     setSettingsVisible(true)
     setSettingsOpen(true)
   }
 
   function closeSettings() {
     setSettingsOpen(false)
+  }
+
+  function toggleMode() {
+    if (modeOpen) {
+      closeMode()
+      return
+    }
+
+    closeSettings()
+    setModeVisible(true)
+    setModeOpen(true)
+  }
+
+  function closeMode() {
+    setModeOpen(false)
   }
 
   function handleCopyCode() {
@@ -420,7 +445,24 @@ export default function PartySessionPage() {
         <div className={styles.partySettingsCluster}>
           <div className={`${styles.turnRow} ${styles.partyMetaRow}`}>
             <span className={styles.turnBadge}>{session.is_host ? 'Host' : 'Guest'}</span>
-            <span className={styles.turnBadge}>{modeLabel(session.mode)}</span>
+            {session.is_host ? (
+              <button
+                ref={modeButtonRef}
+                className={[
+                  styles.turnBadge,
+                  styles.modeBadgeButton,
+                  modeOpen ? styles.modeBadgeButtonActive : '',
+                ].filter(Boolean).join(' ')}
+                onClick={toggleMode}
+                type="button"
+                aria-label="Party mode"
+                title="Party mode"
+              >
+                {modeLabel(session.mode)}
+              </button>
+            ) : (
+              <span className={styles.turnBadge}>{modeLabel(session.mode)}</span>
+            )}
             <button
               className={`${styles.turnBadge} ${styles.copyCodeBadge}`}
               onClick={handleCopyCode}
@@ -450,6 +492,30 @@ export default function PartySessionPage() {
 
           {session.is_host && (
             <div
+              ref={modePanelRef}
+              className={[
+                styles.partySettingsSlot,
+                modeVisible ? styles.partySettingsSlotOpen : '',
+                modeVisible && !modeOpen ? styles.partySettingsSlotClosing : '',
+              ].filter(Boolean).join(' ')}
+              onAnimationEnd={(e) => {
+                if (e.currentTarget !== e.target) return
+                if (!modeOpen) setModeVisible(false)
+              }}
+            >
+              {modeVisible && (
+                <PartyModePanel
+                  mode={session.mode}
+                  closing={!modeOpen}
+                  savingMode={savingMode}
+                  onModeChange={handleModeChange}
+                />
+              )}
+            </div>
+          )}
+
+          {session.is_host && (
+            <div
               ref={settingsPanelRef}
               className={[
                 styles.partySettingsSlot,
@@ -463,17 +529,14 @@ export default function PartySessionPage() {
             >
               {settingsVisible && (
                 <PartySettingsPanel
-                  mode={session.mode}
                   allowGuestPlaylistAdds={session.allow_guest_playlist_adds}
                   sourceMinQueueSize={session.source_min_queue_size}
                   addAddedTracksToSource={session.add_added_tracks_to_source}
                   showQueueAttribution={session.show_queue_attribution}
                   closing={!settingsOpen}
-                  savingMode={savingMode}
                   savingGuestPlaylists={savingGuestPlaylists}
                   savingSourceSettings={savingSourceSettings}
                   savingAttribution={savingAttribution}
-                  onModeChange={handleModeChange}
                   onGuestPlaylistAddsChange={handleGuestPlaylistAddsChange}
                   onSourceSettingsChange={handleSourceSettingsChange}
                   onAttributionChange={handleAttributionChange}
@@ -888,64 +951,32 @@ function PartyQueuePanel({
 }
 
 function PartySettingsPanel({
-  mode,
   allowGuestPlaylistAdds,
   sourceMinQueueSize,
   addAddedTracksToSource,
   showQueueAttribution,
   closing,
-  savingMode,
   savingGuestPlaylists,
   savingSourceSettings,
   savingAttribution,
-  onModeChange,
   onGuestPlaylistAddsChange,
   onSourceSettingsChange,
   onAttributionChange,
 }: {
-  mode: PartyMode
   allowGuestPlaylistAdds: boolean
   sourceMinQueueSize: number
   addAddedTracksToSource: boolean
   showQueueAttribution: boolean
   closing: boolean
-  savingMode: PartyMode | null
   savingGuestPlaylists: boolean
   savingSourceSettings: boolean
   savingAttribution: boolean
-  onModeChange: (mode: PartyMode) => void
   onGuestPlaylistAddsChange: (allowGuestPlaylistAdds: boolean) => void
   onSourceSettingsChange: (sourceMinQueueSize: number, addAddedTracksToSource: boolean) => void
   onAttributionChange: (showQueueAttribution: boolean) => void
 }) {
   return (
     <div className={`${styles.partySettingsPanel}${closing ? ` ${styles.partySettingsPanelClosing}` : ''}`}>
-      <button
-        className={`${styles.partyModeOption}${mode === 'open_queue' ? ` ${styles.partyModeOptionActive}` : ''}`}
-        onClick={() => { onModeChange('open_queue') }}
-        disabled={savingMode !== null}
-        type="button"
-        aria-pressed={mode === 'open_queue'}
-      >
-        <span className={styles.partyModeIcon}><PlusIcon /></span>
-        <span>
-          <span className={styles.partyModeTitle}>Add only</span>
-          <span className={styles.partyModeMeta}>Guests add songs. Host shapes the queue.</span>
-        </span>
-      </button>
-      <button
-        className={`${styles.partyModeOption}${mode === 'shared_queue' ? ` ${styles.partyModeOptionActive}` : ''}`}
-        onClick={() => { onModeChange('shared_queue') }}
-        disabled={savingMode !== null}
-        type="button"
-        aria-pressed={mode === 'shared_queue'}
-      >
-        <span className={styles.partyModeIcon}><QueueEditIcon /></span>
-        <span>
-          <span className={styles.partyModeTitle}>Shared queue</span>
-          <span className={styles.partyModeMeta}>Everyone can add, reorder, and remove.</span>
-        </span>
-      </button>
       <button
         className={`${styles.partyModeOption} ${styles.partySettingOption}${allowGuestPlaylistAdds ? ` ${styles.partyModeOptionActive}` : ''}`}
         onClick={() => { onGuestPlaylistAddsChange(!allowGuestPlaylistAdds) }}
@@ -1004,6 +1035,49 @@ function PartySettingsPanel({
         <span>
           <span className={styles.partyModeTitle}>Added by</span>
           <span className={styles.partyModeMeta}>Show who added each queued song.</span>
+        </span>
+      </button>
+    </div>
+  )
+}
+
+function PartyModePanel({
+  mode,
+  closing,
+  savingMode,
+  onModeChange,
+}: {
+  mode: PartyMode
+  closing: boolean
+  savingMode: PartyMode | null
+  onModeChange: (mode: PartyMode) => void
+}) {
+  return (
+    <div className={`${styles.partySettingsPanel} ${styles.partyModePanel}${closing ? ` ${styles.partySettingsPanelClosing}` : ''}`}>
+      <button
+        className={`${styles.partyModeOption}${mode === 'open_queue' ? ` ${styles.partyModeOptionActive}` : ''}`}
+        onClick={() => { onModeChange('open_queue') }}
+        disabled={savingMode !== null}
+        type="button"
+        aria-pressed={mode === 'open_queue'}
+      >
+        <span className={styles.partyModeIcon}><PlusIcon /></span>
+        <span>
+          <span className={styles.partyModeTitle}>Add only</span>
+          <span className={styles.partyModeMeta}>Guests add songs. Host shapes the queue.</span>
+        </span>
+      </button>
+      <button
+        className={`${styles.partyModeOption}${mode === 'shared_queue' ? ` ${styles.partyModeOptionActive}` : ''}`}
+        onClick={() => { onModeChange('shared_queue') }}
+        disabled={savingMode !== null}
+        type="button"
+        aria-pressed={mode === 'shared_queue'}
+      >
+        <span className={styles.partyModeIcon}><QueueEditIcon /></span>
+        <span>
+          <span className={styles.partyModeTitle}>Shared queue</span>
+          <span className={styles.partyModeMeta}>Everyone can add, reorder, and remove.</span>
         </span>
       </button>
     </div>

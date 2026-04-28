@@ -504,6 +504,22 @@
   background: var(--accent-bg);
 }
 
+.modeBadgeButton {
+  font-family: var(--sans);
+  background: transparent;
+  color: var(--text-muted);
+  border-color: var(--border);
+  cursor: pointer;
+}
+
+.modeBadgeButton:hover,
+.modeBadgeButtonActive {
+  color: var(--text-h);
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+  box-shadow: 0 0 14px rgba(170, 59, 255, 0.16);
+}
+
 .settingsBadge {
   width: 34px;
   height: 34px;
@@ -587,6 +603,12 @@
 .partySettingsPanelClosing {
   animation: partySettingsOut 0.18s ease-in forwards;
   pointer-events: none;
+}
+
+.partyModePanel {
+  width: min(420px, calc(100vw - 48px));
+  max-height: none;
+  overflow-y: visible;
 }
 
 .partyModeOption {
