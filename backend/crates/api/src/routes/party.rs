@@ -2,12 +2,14 @@
 
 use axum::{
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, StatusCode},
+    response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
+use chrono::{DateTime, Utc};
 use serde_json::Value;
-use std::str::FromStr;
+use std::{collections::HashSet, str::FromStr};
 use uuid::Uuid;
 
 use crate::AppState;
@@ -52,6 +54,9 @@ pub fn router() -> Router<AppState> {
         .route("/sessions/{id}/queue/search", get(search_queue_tracks))
         .route("/sessions/{id}/queue/reorder", post(reorder_queue))
         .route("/sessions/{id}/queue/remove", post(remove_queue_track))
+        .route("/sessions/{id}/export", get(get_export_preview))
+        .route("/sessions/{id}/export/playlist", post(export_playlist))
+        .route("/sessions/{id}/export/csv", get(export_csv))
         .route("/sessions/{id}/end", post(end_session))
         .route("/library/tracks", get(get_library_tracks))
         .route("/track/{uri}", get(get_track))
@@ -124,6 +129,30 @@ struct QueueResponse {
 #[derive(serde::Serialize)]
 struct SourceQueueResponse {
     items: Vec<SourceQueueItemResponse>,
+}
+
+#[derive(serde::Serialize)]
+struct ExportPreviewResponse {
+    mode: String,
+    items: Vec<ExportItemResponse>,
+}
+
+#[derive(serde::Serialize, Clone)]
+struct ExportItemResponse {
+    id: String,
+    source: String,
+    session_id: Uuid,
+    uri: String,
+    name: Option<String>,
+    artist: Option<String>,
+    album_art_url: Option<String>,
+    duration_ms: Option<u64>,
+    position: usize,
+    play_order: Option<i32>,
+    source_position: Option<i32>,
+    added_by_user_id: Option<Uuid>,
+    added_by_display_name: Option<String>,
+    created_at: Option<DateTime<Utc>>,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -224,6 +253,24 @@ struct ReorderQueueBody {
 #[derive(serde::Deserialize)]
 struct RemoveQueueTrackBody {
     item_id: Uuid,
+}
+
+#[derive(serde::Deserialize)]
+struct ExportQuery {
+    mode: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct ExportPlaylistBody {
+    mode: Option<String>,
+    name: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct ExportPlaylistResponse {
+    playlist_id: String,
+    url: String,
+    track_count: usize,
 }
 
 #[derive(serde::Deserialize)]
@@ -483,6 +530,16 @@ async fn skip_to_next(
     db::party::set_current_track(&state.pool, session_id, Some(&item.track.uri))
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    db::party::add_played_track(
+        &state.pool,
+        &db::party::NewPartyPlayedTrack {
+            session_id,
+            track: item.track.0,
+            added_by_user_id: item.added_by_user_id,
+        },
+    )
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     db::party::refill_queue_from_source(&state.pool, session_id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -781,6 +838,91 @@ async fn remove_queue_track(
     Ok(Json(build_queue_response(&state, session_id).await?))
 }
 
+async fn get_export_preview(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<Uuid>,
+    Query(query): Query<ExportQuery>,
+) -> ApiResult<ExportPreviewResponse> {
+    crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    get_existing_session(&state, session_id).await?;
+    let mode = normalize_export_mode(query.mode.as_deref());
+    let items = build_export_items(&state, session_id, mode).await?;
+
+    Ok(Json(ExportPreviewResponse {
+        mode: mode.to_string(),
+        items,
+    }))
+}
+
+async fn export_playlist(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<Uuid>,
+    Json(body): Json<ExportPlaylistBody>,
+) -> ApiResult<ExportPlaylistResponse> {
+    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    get_existing_session(&state, session_id).await?;
+    let mode = normalize_export_mode(body.mode.as_deref());
+    let items = build_export_items(&state, session_id, mode).await?;
+    if items.is_empty() {
+        return Err(err(StatusCode::UNPROCESSABLE_ENTITY, "nothing to export"));
+    }
+
+    let access_token = get_access_token(&state, user_id).await?;
+    let playlist_name = body
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("Ensemble Party Export");
+    let playlist = spotify::playlist::create_playlist(
+        &access_token,
+        playlist_name,
+        "Exported from an Ensemble party session.",
+    )
+    .await
+    .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
+    let uris = items
+        .iter()
+        .map(|item| item.uri.clone())
+        .collect::<Vec<_>>();
+    spotify::playlist::add_items_to_playlist(&access_token, &playlist.id, &uris)
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
+
+    Ok(Json(ExportPlaylistResponse {
+        playlist_id: playlist.id,
+        url: playlist.url,
+        track_count: uris.len(),
+    }))
+}
+
+async fn export_csv(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<Uuid>,
+    Query(query): Query<ExportQuery>,
+) -> Result<impl IntoResponse, (StatusCode, Json<Value>)> {
+    crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    get_existing_session(&state, session_id).await?;
+    let mode = normalize_export_mode(query.mode.as_deref());
+    let items = build_export_items(&state, session_id, mode).await?;
+    let csv = export_items_csv(&items);
+    let filename = format!("ensemble-party-{mode}.csv");
+
+    Ok((
+        [
+            (header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{filename}\""),
+            ),
+        ],
+        csv,
+    ))
+}
+
 async fn get_library_tracks(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -894,6 +1036,184 @@ async fn build_source_queue_response(
         .collect();
 
     Ok(SourceQueueResponse { items })
+}
+
+async fn build_export_items(
+    state: &AppState,
+    session_id: Uuid,
+    mode: &str,
+) -> Result<Vec<ExportItemResponse>, (StatusCode, Json<Value>)> {
+    let mut rows = Vec::new();
+
+    match mode {
+        "played" => {
+            rows.extend(played_export_items(state, session_id).await?);
+        }
+        "played_plus_queue" => {
+            rows.extend(played_export_items(state, session_id).await?);
+            rows.extend(queue_export_items(state, session_id).await?);
+        }
+        "played_plus_source" => {
+            rows.extend(played_export_items(state, session_id).await?);
+            rows.extend(source_export_items(state, session_id).await?);
+        }
+        "source_pool" => {
+            rows.extend(source_export_items(state, session_id).await?);
+        }
+        _ => unreachable!("export mode should be normalized"),
+    }
+
+    Ok(distinct_export_items(rows))
+}
+
+async fn played_export_items(
+    state: &AppState,
+    session_id: Uuid,
+) -> Result<Vec<ExportItemResponse>, (StatusCode, Json<Value>)> {
+    Ok(db::party::played_tracks(&state.pool, session_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .into_iter()
+        .map(|item| ExportItemResponse {
+            id: item.id.to_string(),
+            source: "played".to_string(),
+            session_id: item.session_id,
+            uri: item.track.uri.clone(),
+            name: item.track.name.clone(),
+            artist: item.track.artist.clone(),
+            album_art_url: item.track.album_art_url.clone(),
+            duration_ms: item.track.duration_ms,
+            position: usize::try_from(item.play_order).unwrap_or(0),
+            play_order: Some(item.play_order),
+            source_position: None,
+            added_by_user_id: item.added_by_user_id,
+            added_by_display_name: item.added_by_display_name,
+            created_at: Some(item.created_at),
+        })
+        .collect())
+}
+
+async fn queue_export_items(
+    state: &AppState,
+    session_id: Uuid,
+) -> Result<Vec<ExportItemResponse>, (StatusCode, Json<Value>)> {
+    Ok(db::party::queue_items(&state.pool, session_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .into_iter()
+        .enumerate()
+        .map(|(position, item)| ExportItemResponse {
+            id: item.id.to_string(),
+            source: "queue".to_string(),
+            session_id: item.session_id,
+            uri: item.track.uri.clone(),
+            name: item.track.name.clone(),
+            artist: item.track.artist.clone(),
+            album_art_url: item.track.album_art_url.clone(),
+            duration_ms: item.track.duration_ms,
+            position,
+            play_order: None,
+            source_position: Some(item.position),
+            added_by_user_id: item.added_by_user_id,
+            added_by_display_name: item.added_by_display_name,
+            created_at: Some(item.created_at),
+        })
+        .collect())
+}
+
+async fn source_export_items(
+    state: &AppState,
+    session_id: Uuid,
+) -> Result<Vec<ExportItemResponse>, (StatusCode, Json<Value>)> {
+    Ok(db::party::source_queue_items(&state.pool, session_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .into_iter()
+        .filter(|item| !item.disabled)
+        .enumerate()
+        .map(|(position, item)| ExportItemResponse {
+            id: item.id.to_string(),
+            source: "source".to_string(),
+            session_id: item.session_id,
+            uri: item.track.uri.clone(),
+            name: item.track.name.clone(),
+            artist: item.track.artist.clone(),
+            album_art_url: item.track.album_art_url.clone(),
+            duration_ms: item.track.duration_ms,
+            position,
+            play_order: None,
+            source_position: Some(item.position),
+            added_by_user_id: item.added_by_user_id,
+            added_by_display_name: item.added_by_display_name,
+            created_at: Some(item.created_at),
+        })
+        .collect())
+}
+
+fn distinct_export_items(items: Vec<ExportItemResponse>) -> Vec<ExportItemResponse> {
+    let mut seen = HashSet::new();
+    items
+        .into_iter()
+        .filter(|item| seen.insert(item.uri.clone()))
+        .enumerate()
+        .map(|(position, item)| ExportItemResponse { position, ..item })
+        .collect()
+}
+
+fn normalize_export_mode(mode: Option<&str>) -> &'static str {
+    match mode {
+        Some("played_plus_queue") => "played_plus_queue",
+        Some("played_plus_source") => "played_plus_source",
+        Some("source_pool") => "source_pool",
+        _ => "played",
+    }
+}
+
+fn export_items_csv(items: &[ExportItemResponse]) -> String {
+    let mut csv = String::from(
+        "position,source,session_id,source_id,uri,name,artist,album_art_url,duration_ms,play_order,source_position,added_by_user_id,added_by_display_name,created_at\n",
+    );
+
+    for item in items {
+        let fields = [
+            item.position.to_string(),
+            item.source.clone(),
+            item.session_id.to_string(),
+            item.id.clone(),
+            item.uri.clone(),
+            item.name.clone().unwrap_or_default(),
+            item.artist.clone().unwrap_or_default(),
+            item.album_art_url.clone().unwrap_or_default(),
+            item.duration_ms.map(|v| v.to_string()).unwrap_or_default(),
+            item.play_order.map(|v| v.to_string()).unwrap_or_default(),
+            item.source_position
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            item.added_by_user_id
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            item.added_by_display_name.clone().unwrap_or_default(),
+            item.created_at.map(|v| v.to_rfc3339()).unwrap_or_default(),
+        ];
+        csv.push_str(
+            &fields
+                .into_iter()
+                .map(csv_field)
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        csv.push('\n');
+    }
+
+    csv
+}
+
+fn csv_field(value: String) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value
+    }
 }
 
 async fn seed_source_playlist(

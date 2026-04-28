@@ -5,6 +5,8 @@ import QueueTrackLabel from '../../components/QueueTrackLabel'
 import { supabase } from '../../lib/supabase'
 import {
   type PartyMode,
+  type PartyExportMode,
+  type PartyExportPreview,
   type PartyPlaylistSearchResult,
   type PartyQueueItem,
   type PartyQueueState,
@@ -13,7 +15,10 @@ import {
   addPartyQueuePlaylist,
   addPartyQueueTrack,
   endPartySession,
+  exportPartyPlaylist,
   getPartyPlayback,
+  getPartyExportCsv,
+  getPartyExportPreview,
   getPartyLibraryTracks,
   getPartyQueue,
   getPartySession,
@@ -45,6 +50,12 @@ export default function PartySessionPage() {
   const [queue, setQueue] = useState<PartyQueueState>({ items: [] })
   const [sourceQueue, setSourceQueue] = useState<PartySourceQueueState | null>(null)
   const [sourceQueueOpen, setSourceQueueOpen] = useState(false)
+  const [exportMode, setExportMode] = useState<PartyExportMode>('played')
+  const [exportPreview, setExportPreview] = useState<PartyExportPreview | null>(null)
+  const [exportLoading, setExportLoading] = useState(false)
+  const [exportingPlaylist, setExportingPlaylist] = useState(false)
+  const [exportingCsv, setExportingCsv] = useState(false)
+  const [exportUrl, setExportUrl] = useState<string | null>(null)
   const [track, setTrack] = useState<TrackDetails | null>(null)
   const [playback, setPlayback] = useState<ObservedPlayback | null>(null)
   const [libraryTracks, setLibraryTracks] = useState<TrackSearchResult[]>([])
@@ -61,6 +72,8 @@ export default function PartySessionPage() {
   const [savingSourceSettings, setSavingSourceSettings] = useState(false)
   const [savingAttribution, setSavingAttribution] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [confirmingEnd, setConfirmingEnd] = useState(false)
+  const [exportDialogOpen, setExportDialogOpen] = useState(false)
   const [duplicatePulse, setDuplicatePulse] = useState<{ itemId: string; token: number } | null>(null)
   const duplicatePulseTokenRef = useRef(0)
   const pendingRemovedIdsRef = useRef<Set<string>>(new Set())
@@ -104,6 +117,12 @@ export default function PartySessionPage() {
   useEffect(() => {
     if (!session?.id) return
 
+    refreshExportPreview(session.id, exportMode)
+  }, [session?.id, exportMode])
+
+  useEffect(() => {
+    if (!session?.id) return
+
     const interval = window.setInterval(() => {
       void getPartySession(session.id)
         .then((s) => { setSession(applyDevGuestOverride(s)) })
@@ -111,6 +130,7 @@ export default function PartySessionPage() {
       void getPartyQueue(session.id)
         .then((q) => { setQueue(filterPendingRemoved(q, pendingRemovedIdsRef.current)) })
         .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
+      refreshExportPreview(session.id, exportMode, false)
       if (sourceQueueOpen) {
         void getPartySourceQueue(session.id)
           .then(setSourceQueue)
@@ -119,7 +139,7 @@ export default function PartySessionPage() {
     }, 3000)
 
     return () => { window.clearInterval(interval) }
-  }, [session?.id, sourceQueueOpen])
+  }, [exportMode, session?.id, sourceQueueOpen])
 
   useEffect(() => {
     if (!session?.id) return
@@ -153,6 +173,18 @@ export default function PartySessionPage() {
       .on(
         'postgres_changes',
         {
+          event: '*',
+          schema: 'public',
+          table: 'party_played_tracks',
+          filter: `session_id=eq.${session.id}`,
+        },
+        () => {
+          refreshExportPreview(session.id, exportMode, false)
+        },
+      )
+      .on(
+        'postgres_changes',
+        {
           event: 'UPDATE',
           schema: 'public',
           table: 'party_sessions',
@@ -165,7 +197,7 @@ export default function PartySessionPage() {
       .subscribe()
 
     return () => { void supabase.removeChannel(channel) }
-  }, [session?.id, sourceQueueOpen])
+  }, [exportMode, session?.id, sourceQueueOpen])
 
   useEffect(() => {
     const interval = window.setInterval(() => { setNow(Date.now()) }, 250)
@@ -237,6 +269,17 @@ export default function PartySessionPage() {
   function refreshQueues(id = session?.id) {
     refreshQueue(id)
     refreshSourceQueue(id)
+  }
+
+  function refreshExportPreview(id = session?.id, mode = exportMode, showLoading = true) {
+    if (!id) return
+    if (showLoading) setExportLoading(true)
+    void getPartyExportPreview(id, mode)
+      .then((preview) => { setExportPreview(preview) })
+      .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
+      .finally(() => {
+        if (showLoading) setExportLoading(false)
+      })
   }
 
   function handleAdd(item: TrackSearchResult) {
@@ -317,6 +360,11 @@ export default function PartySessionPage() {
 
   function handleEnd() {
     if (!session?.is_host) return
+    setConfirmingEnd(true)
+  }
+
+  function handleEndConfirmed() {
+    if (!session?.is_host) return
     void endPartySession(session.id)
       .then(() => {
         localStorage.removeItem(PARTY_SESSION_KEY)
@@ -367,6 +415,32 @@ export default function PartySessionPage() {
       .then((s) => { setSession(applyDevGuestOverride(s)) })
       .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
       .finally(() => { setSavingAttribution(false) })
+  }
+
+  function handleExportPlaylist() {
+    if (!session) return
+    setExportingPlaylist(true)
+    setExportUrl(null)
+    void exportPartyPlaylist(session.id, exportMode, exportPlaylistName())
+      .then((response) => { setExportUrl(response.url) })
+      .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
+      .finally(() => { setExportingPlaylist(false) })
+  }
+
+  function handleExportCsv() {
+    if (!session) return
+    setExportingCsv(true)
+    void getPartyExportCsv(session.id, exportMode)
+      .then((blob) => {
+        const url = URL.createObjectURL(blob)
+        const anchor = document.createElement('a')
+        anchor.href = url
+        anchor.download = `ensemble-party-${exportMode}.csv`
+        anchor.click()
+        URL.revokeObjectURL(url)
+      })
+      .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
+      .finally(() => { setExportingCsv(false) })
   }
 
   function handleToggleSourceQueue() {
@@ -609,7 +683,16 @@ export default function PartySessionPage() {
           <button className={styles.pillGhostBtn} onClick={handleToggleSourceQueue}>
             {sourceQueueOpen ? 'Hide source queue' : 'View source queue'}
           </button>
-          <button className={styles.endBtn} onClick={handleEnd}>End session</button>
+          <div className={styles.sessionActionsRow}>
+            <button
+              className={styles.pillGhostBtn}
+              onClick={() => { setExportDialogOpen(true) }}
+              type="button"
+            >
+              Export
+            </button>
+            <button className={styles.endBtn} onClick={handleEnd} type="button">End session</button>
+          </div>
         </div>
       ) : (
         <button
@@ -619,9 +702,83 @@ export default function PartySessionPage() {
             localStorage.removeItem(PARTY_GUEST_SESSION_KEY)
             void navigate('/party')
           }}
+          type="button"
         >
           Leave session
         </button>
+      )}
+
+      {exportDialogOpen && (
+        <div
+          className={styles.dialogOverlay}
+          onClick={() => { setExportDialogOpen(false) }}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Export session"
+        >
+          <div className={styles.dialogPanel} onClick={(e) => { e.stopPropagation() }}>
+            <div className={styles.dialogHeader}>
+              <span className={styles.dialogTitle}>Export</span>
+              <button
+                className={styles.dialogCloseBtn}
+                onClick={() => { setExportDialogOpen(false) }}
+                type="button"
+                aria-label="Close"
+              >
+                <CloseIcon />
+              </button>
+            </div>
+            <PartyExportPanel
+              mode={exportMode}
+              preview={exportPreview}
+              loading={exportLoading}
+              exportingPlaylist={exportingPlaylist}
+              exportingCsv={exportingCsv}
+              exportUrl={exportUrl}
+              showAttribution={session.show_queue_attribution}
+              onModeChange={(mode) => {
+                setExportMode(mode)
+                setExportUrl(null)
+              }}
+              onExportPlaylist={handleExportPlaylist}
+              onExportCsv={handleExportCsv}
+            />
+          </div>
+        </div>
+      )}
+
+      {confirmingEnd && (
+        <div
+          className={styles.dialogOverlay}
+          onClick={() => { setConfirmingEnd(false) }}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Confirm end session"
+        >
+          <div
+            className={`${styles.dialogPanel} ${styles.dialogPanelCompact}`}
+            onClick={(e) => { e.stopPropagation() }}
+          >
+            <p className={styles.dialogConfirmText}>End this session?</p>
+            <p className={styles.dialogConfirmSub}>Everyone will be disconnected.</p>
+            <div className={styles.dialogConfirmBtns}>
+              <button
+                className={styles.pillGhostBtn}
+                onClick={() => { setConfirmingEnd(false) }}
+                type="button"
+              >
+                Cancel
+              </button>
+              <button
+                className={styles.endBtn}
+                onClick={handleEndConfirmed}
+                type="button"
+              >
+                End session
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )
@@ -632,6 +789,14 @@ function applyDevGuestOverride(session: PartySession): PartySession {
   return localStorage.getItem(PARTY_GUEST_SESSION_KEY) === session.id
     ? { ...session, is_host: false }
     : session
+}
+
+function exportPlaylistName() {
+  return `Ensemble Party ${new Date().toLocaleDateString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  })}`
 }
 
 function PartyQueuePanel({
@@ -942,6 +1107,111 @@ function PartyQueuePanel({
           removeDropLabel="Remove"
           renderActions={(item) => (
             showAttribution ? <AttributionBadge name={item.added_by_display_name} /> : null
+          )}
+          renderItem={(item) => <QueueTrackLabel item={item} />}
+        />
+      )}
+    </section>
+  )
+}
+
+const exportModeLabels: Record<PartyExportMode, string> = {
+  played: 'Played',
+  played_plus_queue: 'Played + up next',
+  played_plus_source: 'Played + source',
+  source_pool: 'Source pool',
+}
+
+function ignoreExportReorder(item: PartyExportPreview['items'][number], toPosition: number) {
+  void item
+  void toPosition
+  return undefined
+}
+
+function PartyExportPanel({
+  mode,
+  preview,
+  loading,
+  exportingPlaylist,
+  exportingCsv,
+  exportUrl,
+  showAttribution,
+  onModeChange,
+  onExportPlaylist,
+  onExportCsv,
+}: {
+  mode: PartyExportMode
+  preview: PartyExportPreview | null
+  loading: boolean
+  exportingPlaylist: boolean
+  exportingCsv: boolean
+  exportUrl: string | null
+  showAttribution: boolean
+  onModeChange: (mode: PartyExportMode) => void
+  onExportPlaylist: () => void
+  onExportCsv: () => void
+}) {
+  const items = preview?.items ?? []
+  const disabled = loading || items.length === 0 || exportingPlaylist || exportingCsv
+
+  return (
+    <section className={`${styles.queuePanel} ${styles.exportPanel}`}>
+      <div className={styles.exportHeader}>
+        <div className={styles.queueTabs}>
+          {(Object.keys(exportModeLabels) as PartyExportMode[]).map((option) => (
+            <button
+              key={option}
+              className={`${styles.queueTab} ${mode === option ? styles.queueTabActive : ''}`}
+              onClick={() => { onModeChange(option) }}
+              type="button"
+              aria-pressed={mode === option}
+            >
+              {exportModeLabels[option]}
+            </button>
+          ))}
+        </div>
+        <div className={styles.exportActions}>
+          <button
+            className={styles.pillGhostBtn}
+            onClick={onExportCsv}
+            disabled={disabled}
+            type="button"
+          >
+            {exportingCsv ? 'Preparing...' : 'CSV'}
+          </button>
+          <button
+            className={styles.pillGhostBtn}
+            onClick={onExportPlaylist}
+            disabled={disabled}
+            type="button"
+          >
+            {exportingPlaylist ? 'Creating...' : 'Spotify'}
+          </button>
+        </div>
+      </div>
+
+      {exportUrl && (
+        <a className={styles.exportLink} href={exportUrl} target="_blank" rel="noreferrer">
+          Open exported playlist
+        </a>
+      )}
+
+      {loading ? (
+        <p className={styles.queueEmpty}>Loading export</p>
+      ) : items.length === 0 ? (
+        <p className={styles.queueEmpty}>Nothing to export yet</p>
+      ) : (
+        <QueueList
+          items={items}
+          getKey={(item) => `${item.source}:${item.id}`}
+          getColor={(item) => exportColor(item.source)}
+          canReorder={false}
+          onReorder={ignoreExportReorder}
+          renderActions={(item) => (
+            <span className={styles.exportItemActions}>
+              <span className={styles.exportSourceBadge}>{sourceLabel(item.source)}</span>
+              {showAttribution ? <AttributionBadge name={item.added_by_display_name} /> : null}
+            </span>
           )}
           renderItem={(item) => <QueueTrackLabel item={item} />}
         />
@@ -1414,6 +1684,14 @@ function PersonIcon() {
   )
 }
 
+function CloseIcon() {
+  return (
+    <IconSvg>
+      <path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" />
+    </IconSvg>
+  )
+}
+
 function applyMove(queue: PartyQueueState, itemId: string, toPosition: number): PartyQueueState {
   const items = [...queue.items]
   const fromPosition = items.findIndex((item) => item.id === itemId)
@@ -1516,6 +1794,18 @@ function canAddPlaylists(session: PartySession): boolean {
 
 function modeLabel(mode: PartyMode): string {
   return mode === 'shared_queue' ? 'Shared queue' : 'Add only'
+}
+
+function sourceLabel(source: string): string {
+  if (source === 'played') return 'Played'
+  if (source === 'queue') return 'Up next'
+  return 'Source'
+}
+
+function exportColor(source: string): string {
+  if (source === 'played') return '#1db954'
+  if (source === 'queue') return '#f59e0b'
+  return '#38bdf8'
 }
 
 function clampInt(value: string, min: number, max: number): number {

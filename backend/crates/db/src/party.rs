@@ -54,6 +54,17 @@ pub struct PartySourceQueueItem {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct PartyPlayedTrack {
+    pub id: Uuid,
+    pub session_id: Uuid,
+    pub play_order: i32,
+    pub track: Json<PartyTrack>,
+    pub added_by_user_id: Option<Uuid>,
+    pub added_by_display_name: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
 pub struct NewPartySession {
     pub host_user_id: Uuid,
     pub room_code: String,
@@ -73,6 +84,12 @@ pub struct NewPartySourceQueueItem {
     pub position: i32,
     pub track: PartyTrack,
     pub added_by_user_id: Uuid,
+}
+
+pub struct NewPartyPlayedTrack {
+    pub session_id: Uuid,
+    pub track: PartyTrack,
+    pub added_by_user_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,12 +213,38 @@ pub async fn deactivate_user_sessions(pool: &PgPool, host_user_id: Uuid) -> anyh
 
 pub async fn end_session(pool: &PgPool, session_id: Uuid) -> anyhow::Result<()> {
     sqlx::query(
-        "UPDATE public.party_sessions SET is_active = false, updated_at = now() WHERE id = $1",
+        r#"
+        UPDATE public.party_sessions
+        SET is_active = false,
+            current_track_uri = NULL,
+            queued_track_uri = NULL,
+            updated_at = now()
+        WHERE id = $1
+        "#,
     )
     .bind(session_id)
     .execute(pool)
     .await
     .context("ending party session")?;
+
+    sqlx::query("DELETE FROM public.party_queue_items WHERE session_id = $1")
+        .bind(session_id)
+        .execute(pool)
+        .await
+        .context("clearing party queue items")?;
+
+    sqlx::query("DELETE FROM public.party_source_queue_items WHERE session_id = $1")
+        .bind(session_id)
+        .execute(pool)
+        .await
+        .context("clearing party source queue items")?;
+
+    sqlx::query("DELETE FROM public.party_played_tracks WHERE session_id = $1")
+        .bind(session_id)
+        .execute(pool)
+        .await
+        .context("clearing party played tracks")?;
+
     Ok(())
 }
 
@@ -337,6 +380,60 @@ pub async fn set_queued_track(
     .await
     .context("setting party queued track")?;
     Ok(())
+}
+
+pub async fn add_played_track(
+    pool: &PgPool,
+    item: &NewPartyPlayedTrack,
+) -> anyhow::Result<PartyPlayedTrack> {
+    let play_order = sqlx::query_scalar::<_, Option<i32>>(
+        "SELECT max(play_order) + 1 FROM public.party_played_tracks WHERE session_id = $1",
+    )
+    .bind(item.session_id)
+    .fetch_one(pool)
+    .await
+    .context("fetching next party played-track order")?
+    .unwrap_or(0);
+
+    let played = sqlx::query_as::<_, PartyPlayedTrack>(
+        r#"
+        INSERT INTO public.party_played_tracks (
+            session_id, play_order, track, added_by_user_id
+        )
+        VALUES ($1, $2, $3, $4)
+        RETURNING id, session_id, play_order, track, added_by_user_id,
+                  NULL::text AS added_by_display_name, created_at
+        "#,
+    )
+    .bind(item.session_id)
+    .bind(play_order)
+    .bind(Json(&item.track))
+    .bind(item.added_by_user_id)
+    .fetch_one(pool)
+    .await
+    .context("adding party played track")?;
+    Ok(played)
+}
+
+pub async fn played_tracks(
+    pool: &PgPool,
+    session_id: Uuid,
+) -> anyhow::Result<Vec<PartyPlayedTrack>> {
+    let items = sqlx::query_as::<_, PartyPlayedTrack>(
+        r#"
+        SELECT p.id, p.session_id, p.play_order, p.track, p.added_by_user_id,
+               u.display_name AS added_by_display_name, p.created_at
+        FROM public.party_played_tracks p
+        LEFT JOIN public.users u ON u.id = p.added_by_user_id
+        WHERE p.session_id = $1
+        ORDER BY p.play_order ASC, p.created_at ASC
+        "#,
+    )
+    .bind(session_id)
+    .fetch_all(pool)
+    .await
+    .context("fetching party played tracks")?;
+    Ok(items)
 }
 
 pub async fn queue_items(pool: &PgPool, session_id: Uuid) -> anyhow::Result<Vec<PartyQueueItem>> {

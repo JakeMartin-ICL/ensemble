@@ -201,6 +201,11 @@
   background: var(--surface-2);
 }
 
+.pillGhostBtn:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
 .pillIconBtn {
   width: 34px;
   height: 34px;
@@ -1090,6 +1095,59 @@
   border-color: rgba(255, 255, 255, 0.15);
 }
 
+.queueTabActive {
+  color: var(--text-h);
+  border-color: rgba(29, 185, 84, 0.42);
+  background: rgba(29, 185, 84, 0.08);
+}
+
+.exportPanel {
+  padding-top: 2px;
+}
+
+.exportHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.exportActions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.exportLink {
+  align-self: flex-start;
+  color: #1db954;
+  font-size: 13px;
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.exportLink:hover {
+  text-decoration: underline;
+}
+
+.exportItemActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.exportSourceBadge {
+  padding: 4px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
 .queueList {
   list-style: none;
   display: flex;
@@ -1367,6 +1425,15 @@
 }
 
 @media (max-width: 480px) {
+  .exportHeader {
+    flex-direction: column;
+  }
+
+  .exportActions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
   .sourceQueueItem .queueTrackTextCentered {
     padding-inline: 76px;
   }
@@ -1542,4 +1609,150 @@
 .endBtn:hover {
   color: var(--text);
   text-decoration-color: var(--text);
+}
+
+.sessionActionsRow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+/* ── Dialog ── */
+
+.dialogOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  box-sizing: border-box;
+  animation: overlayIn 0.18s ease-out;
+}
+
+.dialogPanel {
+  position: relative;
+  width: 100%;
+  max-width: 560px;
+  max-height: calc(100svh - 48px);
+  overflow-y: auto;
+  background: var(--surface-1, #0e0e16);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 20px;
+  box-shadow: 0 32px 80px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.03) inset;
+  box-sizing: border-box;
+  animation: dialogPanelIn 0.18s ease-out;
+}
+
+.dialogPanelCompact {
+  max-width: 320px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  text-align: center;
+  padding: 28px 24px;
+}
+
+.dialogHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.dialogTitle {
+  font-family: var(--heading);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.dialogCloseBtn {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.dialogCloseBtn:hover {
+  color: var(--text-h);
+  border-color: rgba(255, 255, 255, 0.16);
+  background: var(--surface-2);
+}
+
+.dialogCloseBtn .iconSvg {
+  width: 14px;
+  height: 14px;
+}
+
+.dialogConfirmText {
+  color: var(--text-h);
+  font-family: var(--heading);
+  font-size: 17px;
+  font-weight: 700;
+  margin: 0;
+}
+
+.dialogConfirmSub {
+  color: var(--text-muted);
+  font-size: 13px;
+  margin: 0;
+}
+
+.dialogConfirmBtns {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+@keyframes overlayIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes dialogPanelIn {
+  from {
+    opacity: 0;
+    transform: scale(0.97) translateY(6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+/* Fix export queue items: source badge in auto column, track text in col 1 only */
+.exportPanel .queueItem .queueTrackTextCentered {
+  grid-column: 1 / 2;
+  padding-left: 62px;
+  padding-right: 8px;
+  text-align: left;
+  align-items: flex-start;
+}
+
+/* Override attribution badge to be in-flow inside export item actions */
+.exportItemActions .queueAttributionBadge {
+  position: relative;
+  top: auto;
+  right: auto;
+  transform: none;
 }

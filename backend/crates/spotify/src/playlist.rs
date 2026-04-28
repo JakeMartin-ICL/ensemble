@@ -25,6 +25,34 @@ pub struct TrackSearchResult {
     pub duration_ms: u64,
 }
 
+pub struct CreatedPlaylist {
+    pub id: String,
+    pub url: String,
+}
+
+#[derive(serde::Deserialize)]
+struct RawCreatedPlaylist {
+    id: String,
+    external_urls: RawExternalUrls,
+}
+
+#[derive(serde::Deserialize)]
+struct RawExternalUrls {
+    spotify: String,
+}
+
+#[derive(serde::Serialize)]
+struct CreatePlaylistRequest<'a> {
+    name: &'a str,
+    description: &'a str,
+    public: bool,
+}
+
+#[derive(serde::Serialize)]
+struct AddItemsRequest<'a> {
+    uris: &'a [String],
+}
+
 #[derive(serde::Deserialize)]
 struct RawTracksPage {
     items: Vec<Option<RawTrackItem>>,
@@ -156,6 +184,67 @@ pub async fn get_tracks(
     );
 
     Ok(tracks)
+}
+
+pub async fn create_playlist(
+    access_token: &str,
+    name: &str,
+    description: &str,
+) -> anyhow::Result<CreatedPlaylist> {
+    let resp = reqwest::Client::new()
+        .post("https://api.spotify.com/v1/me/playlists")
+        .bearer_auth(access_token)
+        .json(&CreatePlaylistRequest {
+            name,
+            description,
+            public: false,
+        })
+        .send()
+        .await
+        .context("creating Spotify playlist")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("Spotify create playlist returned {status}: {body}");
+    }
+
+    let playlist = resp
+        .json::<RawCreatedPlaylist>()
+        .await
+        .context("parsing Spotify create playlist response")?;
+
+    Ok(CreatedPlaylist {
+        id: playlist.id,
+        url: playlist.external_urls.spotify,
+    })
+}
+
+pub async fn add_items_to_playlist(
+    access_token: &str,
+    playlist_id: &str,
+    uris: &[String],
+) -> anyhow::Result<()> {
+    let client = reqwest::Client::new();
+    for chunk in uris.chunks(100) {
+        let resp = client
+            .post(format!(
+                "https://api.spotify.com/v1/playlists/{playlist_id}/items"
+            ))
+            .bearer_auth(access_token)
+            .json(&AddItemsRequest { uris: chunk })
+            .send()
+            .await
+            .context("adding Spotify playlist items")?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Spotify add playlist items returned {status}: {body}");
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(serde::Deserialize)]

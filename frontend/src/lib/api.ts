@@ -39,3 +39,9 @@ export async function get<T>(path: string, headers?: Record<string, string>): Pr
   if (!res.ok) throw new Error(await errorMessage(res))
   return res.json() as Promise<T>
 }
+
+export async function getBlob(path: string, headers?: Record<string, string>): Promise<Blob> {
+  const res = await fetch(`${BASE_URL}${path}`, { headers: { ...authHeaders(), ...headers } })
+  if (!res.ok) throw new Error(await errorMessage(res))
+  return res.blob()
+}

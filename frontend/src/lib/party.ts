@@ -1,4 +1,4 @@
-import { get, post } from './api'
+import { get, getBlob, post } from './api'
 import type { PlaybackState, TrackDetails, TrackSearchResult } from './weave'
 
 export interface PartySession {
@@ -48,6 +48,27 @@ export interface PartySourceQueueItem {
   disabled: boolean
   added_by_user_id: string | null
   added_by_display_name: string | null
+}
+
+export type PartyExportMode = 'played' | 'played_plus_queue' | 'played_plus_source' | 'source_pool'
+
+export interface PartyExportItem extends PartyQueueItem {
+  source: 'played' | 'queue' | 'source'
+  session_id: string
+  play_order: number | null
+  source_position: number | null
+  created_at: string | null
+}
+
+export interface PartyExportPreview {
+  mode: PartyExportMode
+  items: PartyExportItem[]
+}
+
+export interface PartyExportPlaylistResponse {
+  playlist_id: string
+  url: string
+  track_count: number
 }
 
 export interface PartySearchResponse {
@@ -140,3 +161,12 @@ export const removePartyQueueTrack = (id: string, item_id: string) =>
 
 export const getPartyTrack = (uri: string) =>
   get<TrackDetails>(`/party/track/${encodeURIComponent(uri)}`)
+
+export const getPartyExportPreview = (id: string, mode: PartyExportMode) =>
+  get<PartyExportPreview>(`/party/sessions/${id}/export?mode=${mode}`)
+
+export const exportPartyPlaylist = (id: string, mode: PartyExportMode, name?: string) =>
+  post<PartyExportPlaylistResponse>(`/party/sessions/${id}/export/playlist`, { mode, name })
+
+export const getPartyExportCsv = (id: string, mode: PartyExportMode) =>
+  getBlob(`/party/sessions/${id}/export/csv?mode=${mode}`)

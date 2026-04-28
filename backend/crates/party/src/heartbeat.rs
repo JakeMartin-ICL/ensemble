@@ -71,7 +71,24 @@ impl HeartbeatDriver for PartyHeartbeat {
         track_uri: &'a str,
     ) -> BoxFuture<'a, anyhow::Result<()>> {
         Box::pin(async move {
-            db::party::set_current_track(&self.pool, self.session_id, Some(track_uri)).await
+            let track = db::party::PartyTrack {
+                uri: track_uri.to_string(),
+                name: None,
+                artist: None,
+                album_art_url: None,
+                duration_ms: None,
+            };
+            db::party::set_current_track(&self.pool, self.session_id, Some(track_uri)).await?;
+            db::party::add_played_track(
+                &self.pool,
+                &db::party::NewPartyPlayedTrack {
+                    session_id: self.session_id,
+                    track,
+                    added_by_user_id: None,
+                },
+            )
+            .await?;
+            Ok(())
         })
     }
 
@@ -81,9 +98,29 @@ impl HeartbeatDriver for PartyHeartbeat {
         track_uri: &'a str,
     ) -> BoxFuture<'a, anyhow::Result<()>> {
         Box::pin(async move {
-            db::party::remove_first_queue_item_by_uri(&self.pool, self.session_id, track_uri)
-                .await?;
+            let item =
+                db::party::remove_first_queue_item_by_uri(&self.pool, self.session_id, track_uri)
+                    .await?;
             db::party::set_current_track(&self.pool, self.session_id, Some(track_uri)).await?;
+            let track = item
+                .as_ref()
+                .map(|item| item.track.0.clone())
+                .unwrap_or_else(|| db::party::PartyTrack {
+                    uri: track_uri.to_string(),
+                    name: None,
+                    artist: None,
+                    album_art_url: None,
+                    duration_ms: None,
+                });
+            db::party::add_played_track(
+                &self.pool,
+                &db::party::NewPartyPlayedTrack {
+                    session_id: self.session_id,
+                    track,
+                    added_by_user_id: item.and_then(|item| item.added_by_user_id),
+                },
+            )
+            .await?;
             db::party::refill_queue_from_source(&self.pool, self.session_id).await
         })
     }
