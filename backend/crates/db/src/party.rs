@@ -284,7 +284,6 @@ pub async fn deactivate_user_sessions(pool: &PgPool, host_user_id: Uuid) -> anyh
     Ok(())
 }
 
-
 pub async fn end_session(pool: &PgPool, session_id: Uuid) -> anyhow::Result<()> {
     sqlx::query(
         r#"
@@ -1141,13 +1140,11 @@ async fn decrement_pins_after_position(
 }
 
 pub async fn clear_all_pins(pool: &PgPool, session_id: Uuid) -> anyhow::Result<()> {
-    sqlx::query(
-        "UPDATE public.party_queue_items SET pin_position = NULL WHERE session_id = $1",
-    )
-    .bind(session_id)
-    .execute(pool)
-    .await
-    .context("clearing all queue item pins")?;
+    sqlx::query("UPDATE public.party_queue_items SET pin_position = NULL WHERE session_id = $1")
+        .bind(session_id)
+        .execute(pool)
+        .await
+        .context("clearing all queue item pins")?;
     Ok(())
 }
 
