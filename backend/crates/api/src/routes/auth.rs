@@ -95,6 +95,21 @@ async fn callback(
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
+    state.auth_sessions.insert(
+        session_token.clone(),
+        crate::CachedAuthSession {
+            user_id,
+            expires_at: session_expires_at,
+        },
+    );
+    state.spotify_tokens.insert(
+        user_id,
+        crate::CachedSpotifyToken {
+            access_token: tokens.access_token.clone(),
+            expires_at: token_expires_at,
+        },
+    );
+
     Ok(Json(CallbackResponse {
         user_id,
         spotify_id: me.id,
@@ -110,7 +125,7 @@ struct RefreshResponse {
 }
 
 async fn refresh(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<RefreshResponse> {
-    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    let user_id = crate::routes::session::cached_user_id_from_headers(&state, &headers).await?;
     let user = db::users::get_user(&state.pool, user_id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
@@ -137,6 +152,14 @@ async fn refresh(State(state): State<AppState>, headers: HeaderMap) -> ApiResult
     )
     .await
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    state.spotify_tokens.insert(
+        user_id,
+        crate::CachedSpotifyToken {
+            access_token: tokens.access_token.clone(),
+            expires_at: token_expires_at,
+        },
+    );
 
     Ok(Json(RefreshResponse {
         access_token: tokens.access_token,

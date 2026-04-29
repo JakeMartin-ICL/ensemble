@@ -15,10 +15,24 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
 
 #[derive(Clone)]
+pub struct CachedAuthSession {
+    pub user_id: Uuid,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Clone)]
+pub struct CachedSpotifyToken {
+    pub access_token: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Clone)]
 pub struct AppState {
     pub pool: db::PgPool,
     pub spotify_redirect_uri: String,
     pub heartbeat_tasks: Arc<DashMap<Uuid, AbortHandle>>,
+    pub auth_sessions: Arc<DashMap<String, CachedAuthSession>>,
+    pub spotify_tokens: Arc<DashMap<Uuid, CachedSpotifyToken>>,
 }
 
 #[tokio::main]
@@ -39,6 +53,8 @@ async fn main() -> anyhow::Result<()> {
         spotify_redirect_uri: std::env::var("SPOTIFY_REDIRECT_URI")
             .context("SPOTIFY_REDIRECT_URI must be set")?,
         heartbeat_tasks: Arc::new(DashMap::new()),
+        auth_sessions: Arc::new(DashMap::new()),
+        spotify_tokens: Arc::new(DashMap::new()),
     };
 
     let allowed_origin: HeaderValue = std::env::var("ALLOWED_ORIGIN")

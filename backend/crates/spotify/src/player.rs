@@ -204,8 +204,7 @@ pub async fn queue_track(access_token: &str, track_uri: &str) -> anyhow::Result<
         .await
         .context("queuing track")?;
 
-    // 204 = success, 404 = no active device (not an error we can do anything about)
-    if resp.status() == 204 || resp.status() == 404 {
+    if resp.status() == 204 {
         return Ok(());
     }
 

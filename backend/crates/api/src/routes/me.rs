@@ -32,7 +32,7 @@ struct DeviceInfo {
 }
 
 pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<MeResponse> {
-    let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
+    let user_id = crate::routes::session::cached_user_id_from_headers(&state, &headers).await?;
 
     let user = db::users::get_user(&state.pool, user_id)
         .await

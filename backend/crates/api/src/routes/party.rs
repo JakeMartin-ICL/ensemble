@@ -413,18 +413,19 @@ async fn actor_from_headers(
     headers: &HeaderMap,
 ) -> Result<PartyActor, (StatusCode, Json<Value>)> {
     let token = crate::routes::session::bearer_token(headers)?;
-    if let Some(user_id) = db::users::user_id_for_session(&state.pool, token)
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
-    {
-        let user = db::users::get_user(&state.pool, user_id)
-            .await
-            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
-            .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "invalid or expired session"))?;
-        return Ok(PartyActor::User {
-            id: user.id,
-            display_name: user.display_name,
-        });
+    match crate::routes::session::cached_user_id_for_token(state, token).await {
+        Ok(user_id) => {
+            let user = db::users::get_user(&state.pool, user_id)
+                .await
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
+                .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "invalid or expired session"))?;
+            return Ok(PartyActor::User {
+                id: user.id,
+                display_name: user.display_name,
+            });
+        }
+        Err((StatusCode::UNAUTHORIZED, _)) => {}
+        Err(e) => return Err(e),
     }
 
     if let Some(guest) = db::party::guest_for_session_token(&state.pool, token)
@@ -455,42 +456,7 @@ async fn get_access_token(
     state: &AppState,
     user_id: Uuid,
 ) -> Result<String, (StatusCode, Json<Value>)> {
-    let user = db::users::get_user(&state.pool, user_id)
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "user not found"))?;
-
-    if user
-        .token_expires_at
-        .signed_duration_since(chrono::Utc::now())
-        < chrono::Duration::seconds(60)
-    {
-        let client_id = user.spotify_client_id.as_deref().ok_or_else(|| {
-            err(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "Spotify client ID is missing; reconnect Spotify",
-            )
-        })?;
-        let tokens = spotify::auth::refresh_token_pkce(&user.refresh_token, client_id)
-            .await
-            .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
-
-        let new_expires_at =
-            chrono::Utc::now() + chrono::Duration::seconds(tokens.expires_in as i64);
-        db::users::update_tokens(
-            &state.pool,
-            user_id,
-            &tokens.access_token,
-            tokens.refresh_token.as_deref(),
-            new_expires_at,
-        )
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-        Ok(tokens.access_token)
-    } else {
-        Ok(user.access_token)
-    }
+    crate::routes::session::cached_access_token(state, user_id).await
 }
 
 async fn create_session(

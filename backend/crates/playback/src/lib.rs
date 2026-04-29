@@ -1,5 +1,6 @@
 //! Shared Spotify playback heartbeat orchestration.
 
+use chrono::{DateTime, Utc};
 use db::PgPool;
 use std::{future::Future, pin::Pin};
 use tracing::{info, warn};
@@ -66,6 +67,7 @@ where
     let label = driver.label();
     let mut queued_for: Option<String> = None;
     let mut sleep_ms = 10_000u64;
+    let mut cached_user: Option<CachedUserToken> = None;
 
     loop {
         tokio::time::sleep(tokio::time::Duration::from_millis(sleep_ms)).await;
@@ -82,11 +84,8 @@ where
         };
 
         let host_user_id = driver.host_user_id(&session);
-        let user = db::users::get_user(driver.pool(), host_user_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("{label} heartbeat: user not found"))?;
-
-        let access_token = maybe_refresh_token(driver.pool(), host_user_id, &user).await?;
+        let access_token =
+            cached_access_token(driver.pool(), host_user_id, &mut cached_user, label).await?;
 
         let playback = match spotify::player::get_playback_state(&access_token).await {
             Ok(Some(p)) => p,
@@ -161,17 +160,52 @@ where
     }
 }
 
+struct CachedUserToken {
+    user_id: Uuid,
+    access_token: String,
+    token_expires_at: DateTime<Utc>,
+}
+
+async fn cached_access_token(
+    pool: &PgPool,
+    user_id: Uuid,
+    cached_user: &mut Option<CachedUserToken>,
+    label: &str,
+) -> anyhow::Result<String> {
+    if let Some(cached) = cached_user.as_ref() {
+        if cached.user_id == user_id
+            && cached.token_expires_at.signed_duration_since(Utc::now())
+                > chrono::Duration::seconds(60)
+        {
+            return Ok(cached.access_token.clone());
+        }
+    }
+
+    let user = db::users::get_user(pool, user_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("{label} heartbeat: user not found"))?;
+    let (access_token, token_expires_at) = maybe_refresh_token(pool, user_id, &user).await?;
+
+    *cached_user = Some(CachedUserToken {
+        user_id,
+        access_token: access_token.clone(),
+        token_expires_at,
+    });
+
+    Ok(access_token)
+}
+
 async fn maybe_refresh_token(
     pool: &PgPool,
     user_id: Uuid,
     user: &db::users::User,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(String, DateTime<Utc>)> {
     if user
         .token_expires_at
         .signed_duration_since(chrono::Utc::now())
         > chrono::Duration::seconds(60)
     {
-        return Ok(user.access_token.clone());
+        return Ok((user.access_token.clone(), user.token_expires_at));
     }
 
     let client_id = user
@@ -188,5 +222,5 @@ async fn maybe_refresh_token(
         new_expires_at,
     )
     .await?;
-    Ok(tokens.access_token)
+    Ok((tokens.access_token, new_expires_at))
 }

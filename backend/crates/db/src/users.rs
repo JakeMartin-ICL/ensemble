@@ -18,6 +18,12 @@ pub struct User {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(sqlx::FromRow)]
+pub struct UserSession {
+    pub user_id: Uuid,
+    pub expires_at: DateTime<Utc>,
+}
+
 pub async fn upsert_user(
     pool: &PgPool,
     spotify_id: &str,
@@ -119,9 +125,18 @@ pub async fn create_session(
 }
 
 pub async fn user_id_for_session(pool: &PgPool, token: &str) -> anyhow::Result<Option<Uuid>> {
-    let user_id = sqlx::query_scalar(
+    Ok(user_session_for_token(pool, token)
+        .await?
+        .map(|session| session.user_id))
+}
+
+pub async fn user_session_for_token(
+    pool: &PgPool,
+    token: &str,
+) -> anyhow::Result<Option<UserSession>> {
+    let session = sqlx::query_as::<_, UserSession>(
         r#"
-        SELECT user_id
+        SELECT user_id, expires_at
         FROM public.user_sessions
         WHERE token_hash = encode(digest($1, 'sha256'), 'hex')
           AND expires_at > now()
@@ -131,5 +146,5 @@ pub async fn user_id_for_session(pool: &PgPool, token: &str) -> anyhow::Result<O
     .fetch_optional(pool)
     .await
     .context("fetching user session")?;
-    Ok(user_id)
+    Ok(session)
 }
