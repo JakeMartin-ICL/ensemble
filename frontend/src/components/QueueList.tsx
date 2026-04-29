@@ -74,7 +74,6 @@ export default function QueueList<T extends PositionedItem>({
   const getColorRef = useRef(getColor)
   const wasDraggingRef = useRef(false)
   const touchMoveCleanupRef = useRef<(() => void) | null>(null)
-  const listRef = useRef<HTMLOListElement | null>(null)
 
   dragKeyRef.current = dragKey
   getKeyRef.current = getKey
@@ -173,17 +172,6 @@ export default function QueueList<T extends PositionedItem>({
   }
 
   useEffect(() => resetDrag, [])
-
-  useEffect(() => {
-    if (!canReorder) return
-    const el = listRef.current
-    if (!el) return
-    // A non-passive touchstart listener forces Chrome to disable its compositor-thread
-    // fast-scroll optimization, so our non-passive touchmove preventDefault() can work.
-    const noop: EventListener = () => { /* non-passive registration only */ }
-    el.addEventListener('touchstart', noop, { passive: false })
-    return () => { el.removeEventListener('touchstart', noop) }
-  }, [canReorder])
 
   useEffect(() => {
     if (!pulseKey) return
@@ -437,7 +425,7 @@ export default function QueueList<T extends PositionedItem>({
 
   return (
     <>
-      <ol ref={listRef} className={`${styles.queueList}${dragKey ? ` ${styles.queueListDragging}` : ''}`}>
+      <ol className={`${styles.queueList}${dragKey ? ` ${styles.queueListDragging}` : ''}`}>
         {items.map((item) => {
           const key = getKey(item)
           const isDragging = dragKey === key
