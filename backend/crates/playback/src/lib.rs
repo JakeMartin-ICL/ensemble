@@ -37,6 +37,13 @@ pub trait HeartbeatDriver: Send + Sync + 'static {
         session: &'a Self::Session,
     ) -> BoxFuture<'a, anyhow::Result<Option<String>>>;
     fn set_queued_track<'a>(&'a self, track_uri: &'a str) -> BoxFuture<'a, anyhow::Result<()>>;
+
+    fn update_playback<'a>(
+        &'a self,
+        _playback: &'a spotify::player::PlaybackState,
+    ) -> BoxFuture<'a, anyhow::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 pub async fn run<D>(params: HeartbeatParams<D>)
@@ -58,9 +65,13 @@ where
     let session_id = driver.session_id();
     let label = driver.label();
     let mut queued_for: Option<String> = None;
+    let mut sleep_ms = 10_000u64;
 
     loop {
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(sleep_ms)).await;
+
+        // Default to slow polling; updated at end of iteration if we have playback state.
+        sleep_ms = 10_000;
 
         let session = match driver.load_session().await? {
             Some(s) if driver.is_active(&s) => s,
@@ -85,6 +96,10 @@ where
                 continue;
             }
         };
+
+        if let Err(e) = driver.update_playback(&playback).await {
+            warn!("{label} heartbeat: failed to update playback state: {e:#}");
+        }
 
         if driver.current_track_uri(&session) != Some(playback.track_uri.as_str()) {
             let result = if driver.queued_track_uri(&session) == Some(playback.track_uri.as_str()) {
@@ -116,6 +131,12 @@ where
         }
 
         let remaining_ms = playback.duration_ms.saturating_sub(playback.progress_ms);
+
+        // Use 1s polling in the last 10s of a track for responsive queue-ahead.
+        if remaining_ms <= 10_000 {
+            sleep_ms = 1_000;
+        }
+
         if remaining_ms > 5_000
             || queued_for.as_deref() == Some(&playback.track_uri)
             || driver.queued_track_uri(&session).is_some()

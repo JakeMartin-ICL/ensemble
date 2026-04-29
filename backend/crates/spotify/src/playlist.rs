@@ -1,48 +1,13 @@
 //! Fetch playlist tracks and user playlists from Spotify.
 
 use anyhow::Context;
-use reqwest::{header, Response, StatusCode};
-use std::fmt;
 
-#[derive(Debug)]
-struct SpotifyApiError {
-    operation: &'static str,
-    status: StatusCode,
-    retry_after: Option<String>,
-    body: String,
-}
-
-impl fmt::Display for SpotifyApiError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Spotify {} returned {}", self.operation, self.status)?;
-        if let Some(retry_after) = &self.retry_after {
-            write!(f, " (retry after {retry_after})")?;
+macro_rules! log_call {
+    ($method:literal, $url:expr) => {
+        if *crate::LOG_CALLS {
+            tracing::info!("Spotify API: {} {}", $method, $url);
         }
-        if !self.body.is_empty() {
-            write!(f, ": {}", self.body)?;
-        }
-        Ok(())
-    }
-}
-
-impl std::error::Error for SpotifyApiError {}
-
-async fn spotify_error(operation: &'static str, resp: Response) -> anyhow::Error {
-    let status = resp.status();
-    let retry_after = resp
-        .headers()
-        .get(header::RETRY_AFTER)
-        .and_then(|value| value.to_str().ok())
-        .map(ToOwned::to_owned);
-    let body = resp.text().await.unwrap_or_default();
-
-    SpotifyApiError {
-        operation,
-        status,
-        retry_after,
-        body,
-    }
-    .into()
+    };
 }
 
 pub struct PlaylistSummary {
@@ -150,6 +115,7 @@ pub async fn get_tracks(
     let mut first_page = true;
 
     while let Some(next_url) = url {
+        log_call!("GET", &next_url);
         let mut req = client.get(&next_url).bearer_auth(access_token);
         if first_page {
             req = req.query(&[
@@ -166,7 +132,7 @@ pub async fn get_tracks(
         let resp = req.send().await.context("fetching playlist tracks")?;
 
         if !resp.status().is_success() {
-            return Err(spotify_error("playlist tracks", resp).await);
+            return Err(crate::spotify_error("playlist tracks", resp).await);
         }
 
         let page = resp
@@ -232,8 +198,10 @@ pub async fn create_playlist(
     name: &str,
     description: &str,
 ) -> anyhow::Result<CreatedPlaylist> {
+    const URL: &str = "https://api.spotify.com/v1/me/playlists";
+    log_call!("POST", URL);
     let resp = reqwest::Client::new()
-        .post("https://api.spotify.com/v1/me/playlists")
+        .post(URL)
         .bearer_auth(access_token)
         .json(&CreatePlaylistRequest {
             name,
@@ -245,7 +213,7 @@ pub async fn create_playlist(
         .context("creating Spotify playlist")?;
 
     if !resp.status().is_success() {
-        return Err(spotify_error("create playlist", resp).await);
+        return Err(crate::spotify_error("create playlist", resp).await);
     }
 
     let playlist = resp
@@ -265,11 +233,11 @@ pub async fn add_items_to_playlist(
     uris: &[String],
 ) -> anyhow::Result<()> {
     let client = reqwest::Client::new();
+    let url = format!("https://api.spotify.com/v1/playlists/{playlist_id}/items");
     for chunk in uris.chunks(100) {
+        log_call!("POST", &url);
         let resp = client
-            .post(format!(
-                "https://api.spotify.com/v1/playlists/{playlist_id}/items"
-            ))
+            .post(&url)
             .bearer_auth(access_token)
             .json(&AddItemsRequest { uris: chunk })
             .send()
@@ -277,7 +245,7 @@ pub async fn add_items_to_playlist(
             .context("adding Spotify playlist items")?;
 
         if !resp.status().is_success() {
-            return Err(spotify_error("add playlist items", resp).await);
+            return Err(crate::spotify_error("add playlist items", resp).await);
         }
     }
 
@@ -330,6 +298,7 @@ pub async fn get_user_playlists(access_token: &str) -> anyhow::Result<Vec<Playli
     let mut url = Some("https://api.spotify.com/v1/me/playlists?limit=50".to_string());
 
     while let Some(next_url) = url {
+        log_call!("GET", &next_url);
         let resp = client
             .get(&next_url)
             .bearer_auth(access_token)
@@ -338,7 +307,7 @@ pub async fn get_user_playlists(access_token: &str) -> anyhow::Result<Vec<Playli
             .context("fetching user playlists")?;
 
         if !resp.status().is_success() {
-            return Err(spotify_error("user playlists", resp).await);
+            return Err(crate::spotify_error("user playlists", resp).await);
         }
 
         let page = resp
@@ -380,8 +349,10 @@ pub async fn search_tracks(
     access_token: &str,
     query: &str,
 ) -> anyhow::Result<Vec<TrackSearchResult>> {
+    const URL: &str = "https://api.spotify.com/v1/search";
+    log_call!("GET", URL);
     let resp = reqwest::Client::new()
-        .get("https://api.spotify.com/v1/search")
+        .get(URL)
         .bearer_auth(access_token)
         .query(&[("q", query), ("type", "track"), ("limit", "10")])
         .send()
@@ -389,7 +360,7 @@ pub async fn search_tracks(
         .context("searching Spotify tracks")?;
 
     if !resp.status().is_success() {
-        return Err(spotify_error("track search", resp).await);
+        return Err(crate::spotify_error("track search", resp).await);
     }
 
     let raw = resp

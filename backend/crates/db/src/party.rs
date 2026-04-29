@@ -29,6 +29,11 @@ pub struct PartySession {
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub playback_track_uri: Option<String>,
+    pub playback_progress_ms: Option<i64>,
+    pub playback_duration_ms: Option<i64>,
+    pub playback_is_playing: Option<bool>,
+    pub playback_updated_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -145,7 +150,9 @@ pub async fn create_session(pool: &PgPool, s: &NewPartySession) -> anyhow::Resul
         VALUES ($1, $2, $3, $4)
         RETURNING id, host_user_id, room_code, mode, allow_guest_playlist_adds,
                   source_min_queue_size, add_added_tracks_to_source, show_queue_attribution,
-                  current_track_uri, queued_track_uri, is_active, created_at, updated_at
+                  current_track_uri, queued_track_uri, is_active, created_at, updated_at,
+                  playback_track_uri, playback_progress_ms, playback_duration_ms,
+                  playback_is_playing, playback_updated_at
         "#,
     )
     .bind(s.host_user_id)
@@ -166,7 +173,9 @@ pub async fn get_active_session(
         r#"
         SELECT id, host_user_id, room_code, mode, allow_guest_playlist_adds,
                source_min_queue_size, add_added_tracks_to_source, show_queue_attribution,
-               current_track_uri, queued_track_uri, is_active, created_at, updated_at
+               current_track_uri, queued_track_uri, is_active, created_at, updated_at,
+               playback_track_uri, playback_progress_ms, playback_duration_ms,
+               playback_is_playing, playback_updated_at
         FROM public.party_sessions
         WHERE host_user_id = $1 AND is_active = true
         ORDER BY created_at DESC
@@ -185,7 +194,9 @@ pub async fn get_session(pool: &PgPool, session_id: Uuid) -> anyhow::Result<Opti
         r#"
         SELECT id, host_user_id, room_code, mode, allow_guest_playlist_adds,
                source_min_queue_size, add_added_tracks_to_source, show_queue_attribution,
-               current_track_uri, queued_track_uri, is_active, created_at, updated_at
+               current_track_uri, queued_track_uri, is_active, created_at, updated_at,
+               playback_track_uri, playback_progress_ms, playback_duration_ms,
+               playback_is_playing, playback_updated_at
         FROM public.party_sessions
         WHERE id = $1
         "#,
@@ -205,7 +216,9 @@ pub async fn get_session_by_room_code(
         r#"
         SELECT id, host_user_id, room_code, mode, allow_guest_playlist_adds,
                source_min_queue_size, add_added_tracks_to_source, show_queue_attribution,
-               current_track_uri, queued_track_uri, is_active, created_at, updated_at
+               current_track_uri, queued_track_uri, is_active, created_at, updated_at,
+               playback_track_uri, playback_progress_ms, playback_duration_ms,
+               playback_is_playing, playback_updated_at
         FROM public.party_sessions
         WHERE room_code = $1 AND is_active = true
         "#,
@@ -320,7 +333,9 @@ pub async fn set_mode(
         WHERE id = $2
         RETURNING id, host_user_id, room_code, mode, allow_guest_playlist_adds,
                   source_min_queue_size, add_added_tracks_to_source, show_queue_attribution,
-                  current_track_uri, queued_track_uri, is_active, created_at, updated_at
+                  current_track_uri, queued_track_uri, is_active, created_at, updated_at,
+                  playback_track_uri, playback_progress_ms, playback_duration_ms,
+                  playback_is_playing, playback_updated_at
         "#,
     )
     .bind(mode.as_str())
@@ -343,7 +358,9 @@ pub async fn set_allow_guest_playlist_adds(
         WHERE id = $2
         RETURNING id, host_user_id, room_code, mode, allow_guest_playlist_adds,
                   source_min_queue_size, add_added_tracks_to_source, show_queue_attribution,
-                  current_track_uri, queued_track_uri, is_active, created_at, updated_at
+                  current_track_uri, queued_track_uri, is_active, created_at, updated_at,
+                  playback_track_uri, playback_progress_ms, playback_duration_ms,
+                  playback_is_playing, playback_updated_at
         "#,
     )
     .bind(allow_guest_playlist_adds)
@@ -367,7 +384,9 @@ pub async fn set_source_settings(
         WHERE id = $3
         RETURNING id, host_user_id, room_code, mode, allow_guest_playlist_adds,
                   source_min_queue_size, add_added_tracks_to_source, show_queue_attribution,
-                  current_track_uri, queued_track_uri, is_active, created_at, updated_at
+                  current_track_uri, queued_track_uri, is_active, created_at, updated_at,
+                  playback_track_uri, playback_progress_ms, playback_duration_ms,
+                  playback_is_playing, playback_updated_at
         "#,
     )
     .bind(source_min_queue_size)
@@ -391,7 +410,9 @@ pub async fn set_show_queue_attribution(
         WHERE id = $2
         RETURNING id, host_user_id, room_code, mode, allow_guest_playlist_adds,
                   source_min_queue_size, add_added_tracks_to_source, show_queue_attribution,
-                  current_track_uri, queued_track_uri, is_active, created_at, updated_at
+                  current_track_uri, queued_track_uri, is_active, created_at, updated_at,
+                  playback_track_uri, playback_progress_ms, playback_duration_ms,
+                  playback_is_playing, playback_updated_at
         "#,
     )
     .bind(show_queue_attribution)
@@ -1320,3 +1341,29 @@ pub async fn sort_voted_queue(pool: &PgPool, session_id: Uuid) -> anyhow::Result
     let ordered_ids: Vec<Uuid> = slots.into_iter().flatten().collect();
     update_queue_positions(pool, session_id, &ordered_ids).await
 }
+
+pub async fn update_playback_state(
+    pool: &PgPool,
+    session_id: Uuid,
+    track_uri: &str,
+    progress_ms: i64,
+    duration_ms: i64,
+    is_playing: bool,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "update party_sessions
+         set playback_track_uri = $1, playback_progress_ms = $2, playback_duration_ms = $3,
+             playback_is_playing = $4, playback_updated_at = now()
+         where id = $5",
+    )
+    .bind(track_uri)
+    .bind(progress_ms)
+    .bind(duration_ms)
+    .bind(is_playing)
+    .bind(session_id)
+    .execute(pool)
+    .await
+    .context("updating party playback state")?;
+    Ok(())
+}
+

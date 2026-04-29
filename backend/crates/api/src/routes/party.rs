@@ -124,6 +124,7 @@ struct PlaybackResponse {
     progress_ms: u64,
     duration_ms: u64,
     is_playing: bool,
+    observed_at_ms: i64,
 }
 
 #[derive(serde::Serialize)]
@@ -321,6 +322,7 @@ impl From<spotify::player::PlaybackState> for PlaybackResponse {
             progress_ms: state.progress_ms,
             duration_ms: state.duration_ms,
             is_playing: state.is_playing,
+            observed_at_ms: chrono::Utc::now().timestamp_millis(),
         }
     }
 }
@@ -360,6 +362,26 @@ impl PartyActor {
 
     fn is_guest(&self) -> bool {
         matches!(self, Self::Guest { .. })
+    }
+
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::User { .. } => "user",
+            Self::Guest { .. } => "guest",
+        }
+    }
+
+    fn id(&self) -> Uuid {
+        match self {
+            Self::User { id, .. } | Self::Guest { id, .. } => *id,
+        }
+    }
+
+    fn guest_session_id(&self) -> Option<Uuid> {
+        match self {
+            Self::User { .. } => None,
+            Self::Guest { session_id, .. } => Some(*session_id),
+        }
     }
 
     fn can_access_session(&self, session_id: Uuid) -> bool {
@@ -580,18 +602,23 @@ async fn get_playback(
     headers: HeaderMap,
     Path(session_id): Path<Uuid>,
 ) -> ApiResult<Option<PlaybackResponse>> {
-    let user_id = user_actor_from_headers(&state, &headers)
-        .await?
-        .user_id()
-        .expect("user actor should have user id");
-    let session = get_host_session(&state, session_id, user_id).await?;
-    let access_token = get_access_token(&state, session.host_user_id).await?;
+    let actor = actor_from_headers(&state, &headers).await?;
+    let session = get_existing_session(&state, session_id).await?;
+    if !actor.can_access_session(session.id) {
+        return Err(err(StatusCode::FORBIDDEN, "not your party session"));
+    }
 
-    let playback = spotify::player::get_playback_state(&access_token)
-        .await
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
+    Ok(Json(playback_from_session(&session)))
+}
 
-    Ok(Json(playback.map(Into::into)))
+fn playback_from_session(session: &db::party::PartySession) -> Option<PlaybackResponse> {
+    Some(PlaybackResponse {
+        track_uri: session.playback_track_uri.clone()?,
+        progress_ms: session.playback_progress_ms? as u64,
+        duration_ms: session.playback_duration_ms? as u64,
+        is_playing: session.playback_is_playing?,
+        observed_at_ms: session.playback_updated_at?.timestamp_millis(),
+    })
 }
 
 async fn pause_session(
@@ -613,6 +640,14 @@ async fn pause_session(
     let playback = spotify::player::get_playback_state(&access_token)
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
+
+    if let Some(ref p) = playback {
+        if let Err(e) = db::party::update_playback_state(
+            &state.pool, session_id, &p.track_uri, p.progress_ms as i64, p.duration_ms as i64, p.is_playing,
+        ).await {
+            tracing::warn!("failed to cache playback state after pause: {e:#}");
+        }
+    }
 
     Ok(Json(playback.map(Into::into)))
 }
@@ -637,6 +672,14 @@ async fn resume_session(
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
 
+    if let Some(ref p) = playback {
+        if let Err(e) = db::party::update_playback_state(
+            &state.pool, session_id, &p.track_uri, p.progress_ms as i64, p.duration_ms as i64, p.is_playing,
+        ).await {
+            tracing::warn!("failed to cache playback state after resume: {e:#}");
+        }
+    }
+
     Ok(Json(playback.map(Into::into)))
 }
 
@@ -659,6 +702,14 @@ async fn restart_session(
     let playback = spotify::player::get_playback_state(&access_token)
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
+
+    if let Some(ref p) = playback {
+        if let Err(e) = db::party::update_playback_state(
+            &state.pool, session_id, &p.track_uri, p.progress_ms as i64, p.duration_ms as i64, p.is_playing,
+        ).await {
+            tracing::warn!("failed to cache playback state after restart: {e:#}");
+        }
+    }
 
     Ok(Json(playback.map(Into::into)))
 }
@@ -810,6 +861,16 @@ async fn search_queue_tracks(
 
     let term = query.q.trim();
     let scope = query.scope.unwrap_or_else(|| "local".to_string());
+    tracing::info!(
+        session_id = %session_id,
+        host_user_id = %session.host_user_id,
+        actor_kind = actor.kind(),
+        actor_id = %actor.id(),
+        actor_guest_session_id = ?actor.guest_session_id(),
+        scope = %scope,
+        term = %term,
+        "party search: request"
+    );
     if term.len() < 2 {
         return Ok(Json(TrackSearchResponse {
             results: Vec::new(),
@@ -817,11 +878,11 @@ async fn search_queue_tracks(
         }));
     }
 
-    let access_token = match &actor {
-        PartyActor::User { id, .. } => get_access_token(&state, *id).await?,
-        PartyActor::Guest { .. } => get_access_token(&state, session.host_user_id).await?,
-    };
     let results = if scope == "spotify" {
+        let access_token = match &actor {
+            PartyActor::User { id, .. } => get_access_token(&state, *id).await?,
+            PartyActor::Guest { .. } => get_access_token(&state, session.host_user_id).await?,
+        };
         spotify::playlist::search_tracks(&access_token, term)
             .await
             .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?
@@ -838,22 +899,9 @@ async fn search_queue_tracks(
             })
             .collect()
     } else {
-        match &actor {
-            PartyActor::User { .. } => search_user_playlist_tracks(&access_token, term)
-                .await
-                .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?,
-            PartyActor::Guest { .. } => search_party_cached_tracks(&state, session_id, term).await?,
-        }
+        search_party_cached_tracks(&state, session_id, term, &actor).await?
     };
-    let playlists = if scope == "spotify" {
-        Vec::new()
-    } else if matches!(actor, PartyActor::User { .. }) {
-        search_user_playlists(&access_token, term)
-            .await
-            .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?
-    } else {
-        Vec::new()
-    };
+    let playlists = Vec::new();
 
     Ok(Json(TrackSearchResponse { results, playlists }))
 }
@@ -1609,6 +1657,7 @@ async fn search_party_cached_tracks(
     state: &AppState,
     session_id: Uuid,
     term: &str,
+    actor: &PartyActor,
 ) -> Result<Vec<TrackSearchResultResponse>, (StatusCode, Json<Value>)> {
     let needle = term.to_lowercase();
     let mut seen = HashSet::new();
@@ -1620,6 +1669,8 @@ async fn search_party_cached_tracks(
     let queue_items = db::party::queue_items(&state.pool, session_id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let source_count = source_items.len();
+    let queue_count = queue_items.len();
 
     for track in source_items
         .into_iter()
@@ -1649,44 +1700,19 @@ async fn search_party_cached_tracks(
         }
     }
 
-    Ok(results)
-}
-
-async fn search_user_playlist_tracks(
-    access_token: &str,
-    term: &str,
-) -> anyhow::Result<Vec<TrackSearchResultResponse>> {
-    let needle = term.to_lowercase();
-    let mut results = Vec::new();
-
-    let playlists = user_playlists(access_token).await?;
-    for track in user_playlist_tracks(access_token, &playlists, 1_500).await {
-        let name = track.name.as_deref().unwrap_or("");
-        let artist = track.artist.as_deref().unwrap_or("");
-        if !name.to_lowercase().contains(&needle) && !artist.to_lowercase().contains(&needle) {
-            continue;
-        }
-
-        results.push(track);
-        if results.len() >= 20 {
-            return Ok(results);
-        }
-    }
+    tracing::info!(
+        session_id = %session_id,
+        actor_kind = actor.kind(),
+        actor_id = %actor.id(),
+        actor_guest_session_id = ?actor.guest_session_id(),
+        term = %term,
+        source_count,
+        queue_count,
+        match_count = results.len(),
+        "party search: cached local results"
+    );
 
     Ok(results)
-}
-
-async fn search_user_playlists(
-    access_token: &str,
-    term: &str,
-) -> anyhow::Result<Vec<PlaylistSearchResultResponse>> {
-    let needle = term.to_lowercase();
-    Ok(user_playlists(access_token)
-        .await?
-        .into_iter()
-        .filter(|playlist| playlist.name.to_lowercase().contains(&needle))
-        .take(10)
-        .collect())
 }
 
 async fn user_playlists(access_token: &str) -> anyhow::Result<Vec<PlaylistSearchResultResponse>> {

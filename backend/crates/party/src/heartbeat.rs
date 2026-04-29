@@ -144,4 +144,21 @@ impl HeartbeatDriver for PartyHeartbeat {
             db::party::set_queued_track(&self.pool, self.session_id, track_uri).await
         })
     }
+
+    fn update_playback<'a>(
+        &'a self,
+        playback: &'a spotify::player::PlaybackState,
+    ) -> BoxFuture<'a, anyhow::Result<()>> {
+        Box::pin(async move {
+            db::party::update_playback_state(
+                &self.pool,
+                self.session_id,
+                &playback.track_uri,
+                playback.progress_ms as i64,
+                playback.duration_ms as i64,
+                playback.is_playing,
+            )
+            .await
+        })
+    }
 }

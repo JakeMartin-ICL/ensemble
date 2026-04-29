@@ -65,6 +65,7 @@ export default function PartySessionPage() {
   const [libraryPlaylists, setLibraryPlaylists] = useState<PartyPlaylistSearchResult[]>([])
   const [libraryLoading, setLibraryLoading] = useState(false)
   const [libraryLoaded, setLibraryLoaded] = useState(false)
+  const [libraryError, setLibraryError] = useState<string | null>(null)
   const [now, setNow] = useState(() => Date.now())
   const [copiedCode, setCopiedCode] = useState(false)
   const [modeOpen, setModeOpen] = useState(false)
@@ -229,19 +230,28 @@ export default function PartySessionPage() {
   }, [modeOpen, settingsOpen])
 
   useEffect(() => {
-    if (!session?.is_host || !session.id) return
+    if (!session?.id) return
 
     function refreshPlayback() {
       if (!session) return
       void getPartyPlayback(session.id)
-        .then((p) => { setPlayback(p ? { ...p, observed_at: Date.now() } : null) })
+        .then((p) => {
+          setPlayback((current) => {
+            if (!p) return null
+            // Ignore stale DB snapshots: the heartbeat writes every 10s, but
+            // pause/resume actions update observed_at to Date.now() immediately.
+            // If this snapshot is older than what we already have, keep current.
+            if (current && p.observed_at_ms < current.observed_at) return current
+            return { ...p, observed_at: p.observed_at_ms }
+          })
+        })
         .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
     }
 
     refreshPlayback()
     const interval = window.setInterval(refreshPlayback, 2000)
     return () => { window.clearInterval(interval) }
-  }, [session?.id, session?.is_host])
+  }, [session?.id])
 
   useEffect(() => {
     const uri = playback?.track_uri ?? session?.current_track_uri
@@ -291,13 +301,19 @@ export default function PartySessionPage() {
     }
 
     setLibraryLoading(true)
+    setLibraryError(null)
     libraryRequestRef.current = getPartyLibraryTracks()
       .then((response) => {
         setLibraryTracks(response.results)
         setLibraryPlaylists(response.playlists)
         setLibraryLoaded(true)
       })
-      .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
+      .catch((e: unknown) => {
+        setLibraryTracks([])
+        setLibraryPlaylists([])
+        setLibraryLoaded(true)
+        setLibraryError(e instanceof Error ? e.message : String(e))
+      })
       .finally(() => {
         libraryRequestRef.current = null
         setLibraryLoading(false)
@@ -380,22 +396,28 @@ export default function PartySessionPage() {
         refreshQueues(s.id)
         return getPartyPlayback(s.id)
       })
-      .then((p) => { setPlayback(p ? { ...p, observed_at: Date.now() } : null) })
+      .then((p) => { setPlayback(p ? { ...p, observed_at: p.observed_at_ms } : null) })
       .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
   }
 
   function handlePlayPause() {
     if (!session?.is_host) return
     const action = playback?.is_playing ? pausePartySession : resumePartySession
+    setPlayback((current) => {
+      if (!current) return null
+      const now = Date.now()
+      return current.is_playing
+        ? { ...current, is_playing: false, progress_ms: currentProgress(current, now), observed_at: now }
+        : { ...current, is_playing: true, observed_at: now }
+    })
     void action(session.id)
-      .then((p) => { setPlayback(p ? { ...p, observed_at: Date.now() } : null) })
       .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
   }
 
   function handleRestart() {
     if (!session?.is_host) return
+    setPlayback((current) => current ? { ...current, is_playing: true, progress_ms: 0, observed_at: Date.now() } : null)
     void restartPartySession(session.id)
-      .then((p) => { setPlayback(p ? { ...p, observed_at: Date.now() } : null) })
       .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
   }
 
@@ -663,35 +685,35 @@ export default function PartySessionPage() {
           </div>
 
         {session.is_host && (
-          <>
-            <div className={styles.transportControls}>
-              <span />
-              <button className={styles.iconBtn} onClick={handleRestart} aria-label="Restart song" title="Restart song">
-                <RestartIcon />
-              </button>
-              <button
-                className={`${styles.iconBtn} ${styles.playBtn}`}
-                onClick={handlePlayPause}
-                aria-label={playback?.is_playing ? 'Pause' : 'Play'}
-                title={playback?.is_playing ? 'Pause' : 'Play'}
-              >
-                {playback?.is_playing ? <PauseIcon /> : <PlayIcon />}
-              </button>
-              <button className={styles.iconBtn} onClick={handleSkip} aria-label="Play next" title="Play next">
-                <SkipSongIcon />
-              </button>
-              <span />
+          <div className={styles.transportControls}>
+            <span />
+            <button className={styles.iconBtn} onClick={handleRestart} aria-label="Restart song" title="Restart song">
+              <RestartIcon />
+            </button>
+            <button
+              className={`${styles.iconBtn} ${styles.playBtn}`}
+              onClick={handlePlayPause}
+              aria-label={playback?.is_playing ? 'Pause' : 'Play'}
+              title={playback?.is_playing ? 'Pause' : 'Play'}
+            >
+              {playback?.is_playing ? <PauseIcon /> : <PlayIcon />}
+            </button>
+            <button className={styles.iconBtn} onClick={handleSkip} aria-label="Play next" title="Play next">
+              <SkipSongIcon />
+            </button>
+            <span />
+          </div>
+        )}
+        {durationMs > 0 && (
+          <div className={styles.progressPanel}>
+            <div className={styles.progressTimes}>
+              <span>{formatTime(progressMs)}</span>
+              <span>{formatTime(durationMs)}</span>
             </div>
-            <div className={styles.progressPanel}>
-              <div className={styles.progressTimes}>
-                <span>{formatTime(progressMs)}</span>
-                <span>{formatTime(durationMs)}</span>
-              </div>
-              <div className={styles.progressTrack}>
-                <div className={styles.progressFill} style={{ width: `${progressPct.toString()}%` }} />
-              </div>
+            <div className={styles.progressTrack}>
+              <div className={styles.progressFill} style={{ width: `${progressPct.toString()}%` }} />
             </div>
-          </>
+          </div>
         )}
       </div>
 
@@ -706,6 +728,7 @@ export default function PartySessionPage() {
         libraryTracks={libraryTracks}
         libraryPlaylists={libraryPlaylists}
         libraryLoading={libraryLoading}
+        libraryError={libraryError}
         onLoadLibrary={ensureLibraryLoaded}
         onAddTrack={handleAdd}
         onAddPlaylist={handleAddPlaylist}
@@ -857,6 +880,7 @@ function PartyQueuePanel({
   libraryTracks,
   libraryPlaylists,
   libraryLoading,
+  libraryError,
   onLoadLibrary,
   onAddTrack,
   onAddPlaylist,
@@ -875,6 +899,7 @@ function PartyQueuePanel({
   libraryTracks: TrackSearchResult[]
   libraryPlaylists: PartyPlaylistSearchResult[]
   libraryLoading: boolean
+  libraryError: string | null
   onLoadLibrary: () => void
   onAddTrack: (item: TrackSearchResult) => Promise<void>
   onAddPlaylist: (playlist: PartyPlaylistSearchResult) => Promise<void>
@@ -884,8 +909,7 @@ function PartyQueuePanel({
   onUnpin: (item: PartyQueueItem) => void
 }) {
   const [query, setQuery] = useState('')
-  const [localResults, setLocalResults] = useState<TrackSearchResult[]>([])
-  const [playlistResults, setPlaylistResults] = useState<PartyPlaylistSearchResult[]>([])
+  const [sessionResults, setSessionResults] = useState<TrackSearchResult[]>([])
   const [spotifyResults, setSpotifyResults] = useState<TrackSearchResult[] | null>(null)
   const [searchingLocal, setSearchingLocal] = useState(false)
   const [searchingSpotify, setSearchingSpotify] = useState(false)
@@ -897,37 +921,65 @@ function PartyQueuePanel({
   useEffect(() => {
     const term = query.trim()
     if (term.length < 2) {
-      setLocalResults([])
-      setPlaylistResults([])
+      setSessionResults([])
       setSpotifyResults(null)
       setSearchingLocal(false)
       return
     }
 
-    setSearchingLocal(true)
     setSpotifyResults(null)
+    if (import.meta.env.DEV) {
+      console.debug('[party search] local start', {
+        sessionId,
+        isGuest: session.is_guest,
+        isHost: session.is_host,
+        term,
+        loadedLibraryTracks: libraryTracks.length,
+        loadedLibraryPlaylists: libraryPlaylists.length,
+      })
+    }
+    setSearchingLocal(true)
+    let cancelled = false
     const timer = window.setTimeout(() => {
-      if (session.is_guest) {
-        void searchPartyTracks(sessionId, term, 'local')
-          .then((response) => {
-            setLocalResults(response.results)
-            setPlaylistResults([])
-          })
-          .catch(() => {
-            setLocalResults([])
-            setPlaylistResults([])
-          })
-          .finally(() => { setSearchingLocal(false) })
-      } else {
+      if (!session.is_guest) {
         onLoadLibrary()
-        setLocalResults(searchLoadedLibrary(libraryTracks, term, 20))
-        setPlaylistResults(canAddPlaylists ? searchLoadedPlaylists(libraryPlaylists, term, 10) : [])
-        setSearchingLocal(false)
       }
+      void searchPartyTracks(sessionId, term, 'local')
+        .then((response) => {
+          if (import.meta.env.DEV) {
+            console.debug('[party search] local response', {
+              sessionId,
+              isGuest: session.is_guest,
+              isHost: session.is_host,
+              term,
+              responseTracks: response.results.length,
+              responsePlaylists: response.playlists.length,
+            })
+          }
+          if (!cancelled) setSessionResults(response.results)
+        })
+        .catch((e: unknown) => {
+          if (import.meta.env.DEV) {
+            console.debug('[party search] local failed', {
+              sessionId,
+              isGuest: session.is_guest,
+              isHost: session.is_host,
+              term,
+              error: e instanceof Error ? e.message : String(e),
+            })
+          }
+          if (!cancelled) setSessionResults([])
+        })
+        .finally(() => {
+          if (!cancelled) setSearchingLocal(false)
+        })
     }, 180)
 
-    return () => { window.clearTimeout(timer) }
-  }, [canAddPlaylists, libraryPlaylists, libraryTracks, onLoadLibrary, query, session.is_guest, sessionId])
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [libraryPlaylists.length, libraryTracks.length, onLoadLibrary, query, session.is_guest, session.is_host, sessionId])
 
   function handleSearchSpotify() {
     const term = query.trim()
@@ -944,8 +996,7 @@ function PartyQueuePanel({
     void onAddTrack(result).finally(() => {
       setAddingUri(null)
       setQuery('')
-      setLocalResults([])
-      setPlaylistResults([])
+      setSessionResults([])
       setSpotifyResults(null)
     })
   }
@@ -955,8 +1006,7 @@ function PartyQueuePanel({
     void onAddPlaylist(playlist).finally(() => {
       setAddingPlaylistId(null)
       setQuery('')
-      setLocalResults([])
-      setPlaylistResults([])
+      setSessionResults([])
       setSpotifyResults(null)
     })
   }
@@ -966,6 +1016,14 @@ function PartyQueuePanel({
     playlists: { playlist_index: number; playlist_id: string; playlist_name: string }[]
   }
 
+  const term = query.trim()
+  const libraryMatches = !session.is_guest && term.length >= 2
+    ? searchLoadedLibrary(libraryTracks, term, 20)
+    : []
+  const playlistResults = !session.is_guest && canAddPlaylists && term.length >= 2
+    ? searchLoadedPlaylists(libraryPlaylists, term, 10)
+    : []
+  const localResults = mergeTrackResults(libraryMatches, sessionResults, 20)
   const localDedupedResults: ResultEntry[] = []
   const seenLocal = new Map<string, ResultEntry>()
   for (const result of localResults) {
@@ -1047,7 +1105,8 @@ function PartyQueuePanel({
           <div ref={searchResultsRef} className={styles.queueSearchResults}>
             {searchOpen && (
               <>
-                {(libraryLoading || searchingLocal) && localDedupedResults.length === 0 && <p className={styles.queueEmpty}>Searching your playlists...</p>}
+                {libraryError && !session.is_guest && <p className={styles.queueEmpty}>Spotify playlist search is unavailable</p>}
+                {(libraryLoading || searchingLocal) && localDedupedResults.length === 0 && <p className={styles.queueEmpty}>{session.is_guest ? 'Searching the party...' : 'Searching your playlists...'}</p>}
                 {!libraryLoading && !searchingLocal && localDedupedResults.length === 0 && playlistResults.length === 0 && <p className={styles.queueEmpty}>No matches</p>}
                 {!libraryLoading && localDedupedResults.map(({ result, playlists }) => (
                   <div key={result.uri} className={styles.queueSearchResult}>
@@ -1995,6 +2054,24 @@ function searchLoadedPlaylists(
   }
 
   return results
+}
+
+function mergeTrackResults(
+  primary: TrackSearchResult[],
+  secondary: TrackSearchResult[],
+  limit: number,
+): TrackSearchResult[] {
+  const seen = new Set<string>()
+  const merged: TrackSearchResult[] = []
+
+  for (const track of [...primary, ...secondary]) {
+    if (seen.has(track.uri)) continue
+    seen.add(track.uri)
+    merged.push(track)
+    if (merged.length >= limit) break
+  }
+
+  return merged
 }
 
 function currentProgress(playback: ObservedPlayback | null, now: number): number {

@@ -2,6 +2,14 @@
 
 use anyhow::Context;
 
+macro_rules! log_call {
+    ($method:literal, $url:expr) => {
+        if *crate::LOG_CALLS {
+            tracing::info!("Spotify API: {} {}", $method, $url);
+        }
+    };
+}
+
 pub struct SpotifyMe {
     pub id: String,
     pub display_name: String,
@@ -54,17 +62,24 @@ struct RawTrackItem {
 }
 
 pub async fn get_me(access_token: &str) -> anyhow::Result<SpotifyMe> {
-    let raw = reqwest::Client::new()
-        .get("https://api.spotify.com/v1/me")
+    const URL: &str = "https://api.spotify.com/v1/me";
+    log_call!("GET", URL);
+    let resp = reqwest::Client::new()
+        .get(URL)
         .bearer_auth(access_token)
         .send()
         .await
-        .context("fetching /v1/me")?
-        .error_for_status()
-        .context("Spotify /v1/me returned error")?
+        .context("fetching /v1/me")?;
+
+    if !resp.status().is_success() {
+        return Err(crate::spotify_error("/v1/me", resp).await);
+    }
+
+    let raw = resp
         .json::<RawMe>()
         .await
         .context("parsing /v1/me response")?;
+
     Ok(SpotifyMe {
         id: raw.id,
         display_name: raw.display_name.unwrap_or_default(),
@@ -72,8 +87,10 @@ pub async fn get_me(access_token: &str) -> anyhow::Result<SpotifyMe> {
 }
 
 pub async fn get_player(access_token: &str) -> anyhow::Result<Option<ActiveDevice>> {
+    const URL: &str = "https://api.spotify.com/v1/me/player";
+    log_call!("GET", URL);
     let resp = reqwest::Client::new()
-        .get("https://api.spotify.com/v1/me/player")
+        .get(URL)
         .bearer_auth(access_token)
         .send()
         .await
@@ -83,9 +100,11 @@ pub async fn get_player(access_token: &str) -> anyhow::Result<Option<ActiveDevic
         return Ok(None);
     }
 
+    if !resp.status().is_success() {
+        return Err(crate::spotify_error("/v1/me/player", resp).await);
+    }
+
     let state = resp
-        .error_for_status()
-        .context("Spotify /v1/me/player returned error")?
         .json::<RawPlayerState>()
         .await
         .context("parsing /v1/me/player response")?;
@@ -105,14 +124,20 @@ struct RawDevicesResponse {
 }
 
 pub async fn get_available_devices(access_token: &str) -> anyhow::Result<Vec<ActiveDevice>> {
-    let devices = reqwest::Client::new()
-        .get("https://api.spotify.com/v1/me/player/devices")
+    const URL: &str = "https://api.spotify.com/v1/me/player/devices";
+    log_call!("GET", URL);
+    let resp = reqwest::Client::new()
+        .get(URL)
         .bearer_auth(access_token)
         .send()
         .await
-        .context("fetching /v1/me/player/devices")?
-        .error_for_status()
-        .context("Spotify /v1/me/player/devices returned error")?
+        .context("fetching /v1/me/player/devices")?;
+
+    if !resp.status().is_success() {
+        return Err(crate::spotify_error("/v1/me/player/devices", resp).await);
+    }
+
+    let devices = resp
         .json::<RawDevicesResponse>()
         .await
         .context("parsing /v1/me/player/devices response")?;
@@ -131,8 +156,10 @@ pub async fn get_available_devices(access_token: &str) -> anyhow::Result<Vec<Act
 }
 
 pub async fn get_playback_state(access_token: &str) -> anyhow::Result<Option<PlaybackState>> {
+    const URL: &str = "https://api.spotify.com/v1/me/player";
+    log_call!("GET", URL);
     let resp = reqwest::Client::new()
-        .get("https://api.spotify.com/v1/me/player")
+        .get(URL)
         .bearer_auth(access_token)
         .send()
         .await
@@ -142,9 +169,11 @@ pub async fn get_playback_state(access_token: &str) -> anyhow::Result<Option<Pla
         return Ok(None);
     }
 
+    if !resp.status().is_success() {
+        return Err(crate::spotify_error("/v1/me/player", resp).await);
+    }
+
     let state = resp
-        .error_for_status()
-        .context("Spotify /v1/me/player returned error")?
         .json::<RawPlayerState>()
         .await
         .context("parsing /v1/me/player response")?;
@@ -163,8 +192,10 @@ pub async fn get_playback_state(access_token: &str) -> anyhow::Result<Option<Pla
 }
 
 pub async fn queue_track(access_token: &str, track_uri: &str) -> anyhow::Result<()> {
+    const URL: &str = "https://api.spotify.com/v1/me/player/queue";
+    log_call!("POST", URL);
     let resp = reqwest::Client::new()
-        .post("https://api.spotify.com/v1/me/player/queue")
+        .post(URL)
         .bearer_auth(access_token)
         .query(&[("uri", track_uri)])
         .header(reqwest::header::CONTENT_LENGTH, "0")
@@ -178,8 +209,10 @@ pub async fn queue_track(access_token: &str, track_uri: &str) -> anyhow::Result<
         return Ok(());
     }
 
-    resp.error_for_status()
-        .context("Spotify queue endpoint returned error")?;
+    if !resp.status().is_success() {
+        return Err(crate::spotify_error("/v1/me/player/queue", resp).await);
+    }
+
     Ok(())
 }
 
@@ -193,9 +226,11 @@ pub async fn start_track(access_token: &str, track_uri: &str) -> anyhow::Result<
 }
 
 pub async fn resume_playback(access_token: &str) -> anyhow::Result<()> {
+    const URL: &str = "https://api.spotify.com/v1/me/player/play";
+    log_call!("PUT", URL);
     let client = reqwest::Client::new();
     let resp = client
-        .put("https://api.spotify.com/v1/me/player/play")
+        .put(URL)
         .bearer_auth(access_token)
         .header(reqwest::header::CONTENT_LENGTH, "0")
         .body("")
@@ -207,11 +242,8 @@ pub async fn resume_playback(access_token: &str) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
-
-    if status != reqwest::StatusCode::NOT_FOUND {
-        anyhow::bail!("Spotify resume playback returned {status}: {body}");
+    if resp.status() != reqwest::StatusCode::NOT_FOUND {
+        return Err(crate::spotify_error("/v1/me/player/play (resume)", resp).await);
     }
 
     let devices = get_available_devices(access_token).await?;
@@ -232,8 +264,9 @@ pub async fn resume_playback(access_token: &str) -> anyhow::Result<()> {
         );
     };
 
+    log_call!("PUT", format!("{URL}?device_id={device_id}"));
     let resp = client
-        .put("https://api.spotify.com/v1/me/player/play")
+        .put(URL)
         .bearer_auth(access_token)
         .query(&[("device_id", device_id)])
         .header(reqwest::header::CONTENT_LENGTH, "0")
@@ -246,14 +279,14 @@ pub async fn resume_playback(access_token: &str) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
-    anyhow::bail!("Spotify resume playback on available device returned {status}: {body}");
+    Err(crate::spotify_error("/v1/me/player/play (resume on device)", resp).await)
 }
 
 pub async fn pause_playback(access_token: &str) -> anyhow::Result<()> {
+    const URL: &str = "https://api.spotify.com/v1/me/player/pause";
+    log_call!("PUT", URL);
     let resp = reqwest::Client::new()
-        .put("https://api.spotify.com/v1/me/player/pause")
+        .put(URL)
         .bearer_auth(access_token)
         .header(reqwest::header::CONTENT_LENGTH, "0")
         .body("")
@@ -265,12 +298,12 @@ pub async fn pause_playback(access_token: &str) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
-    anyhow::bail!("Spotify pause playback returned {status}: {body}");
+    Err(crate::spotify_error("/v1/me/player/pause", resp).await)
 }
 
 pub async fn seek_to_start(access_token: &str) -> anyhow::Result<()> {
+    const URL: &str = "https://api.spotify.com/v1/me/player/seek?position_ms=0";
+    log_call!("PUT", URL);
     let resp = reqwest::Client::new()
         .put("https://api.spotify.com/v1/me/player/seek")
         .bearer_auth(access_token)
@@ -285,9 +318,7 @@ pub async fn seek_to_start(access_token: &str) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
-    anyhow::bail!("Spotify seek playback returned {status}: {body}");
+    Err(crate::spotify_error("/v1/me/player/seek", resp).await)
 }
 
 pub async fn start_tracks(access_token: &str, track_uris: &[String]) -> anyhow::Result<()> {
@@ -295,9 +326,11 @@ pub async fn start_tracks(access_token: &str, track_uris: &[String]) -> anyhow::
         anyhow::bail!("cannot start playback with no tracks");
     }
 
+    const URL: &str = "https://api.spotify.com/v1/me/player/play";
+    log_call!("PUT", URL);
     let client = reqwest::Client::new();
     let resp = client
-        .put("https://api.spotify.com/v1/me/player/play")
+        .put(URL)
         .bearer_auth(access_token)
         .json(&PlayRequest {
             uris: track_uris.to_vec(),
@@ -310,11 +343,8 @@ pub async fn start_tracks(access_token: &str, track_uris: &[String]) -> anyhow::
         return Ok(());
     }
 
-    let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
-
-    if status != reqwest::StatusCode::NOT_FOUND {
-        anyhow::bail!("Spotify start playback returned {status}: {body}");
+    if resp.status() != reqwest::StatusCode::NOT_FOUND {
+        return Err(crate::spotify_error("/v1/me/player/play (start)", resp).await);
     }
 
     let devices = get_available_devices(access_token).await?;
@@ -335,8 +365,9 @@ pub async fn start_tracks(access_token: &str, track_uris: &[String]) -> anyhow::
         );
     };
 
+    log_call!("PUT", format!("{URL}?device_id={device_id}"));
     let resp = client
-        .put("https://api.spotify.com/v1/me/player/play")
+        .put(URL)
         .bearer_auth(access_token)
         .query(&[("device_id", device_id)])
         .json(&PlayRequest {
@@ -355,9 +386,7 @@ pub async fn start_tracks(access_token: &str, track_uris: &[String]) -> anyhow::
         return Ok(());
     }
 
-    let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
-    anyhow::bail!("Spotify start playback on available device returned {status}: {body}");
+    Err(crate::spotify_error("/v1/me/player/play (start on device)", resp).await)
 }
 
 pub struct TrackDetails {
@@ -407,14 +436,20 @@ fn image_url_for_size(images: Vec<RawImage>, target_px: u32) -> Option<String> {
 }
 
 pub async fn get_track(access_token: &str, track_id: &str) -> anyhow::Result<TrackDetails> {
-    let raw = reqwest::Client::new()
-        .get(format!("https://api.spotify.com/v1/tracks/{track_id}"))
+    let url = format!("https://api.spotify.com/v1/tracks/{track_id}");
+    log_call!("GET", &url);
+    let resp = reqwest::Client::new()
+        .get(&url)
         .bearer_auth(access_token)
         .send()
         .await
-        .context("fetching track")?
-        .error_for_status()
-        .context("Spotify /v1/tracks returned error")?
+        .context("fetching track")?;
+
+    if !resp.status().is_success() {
+        return Err(crate::spotify_error("/v1/tracks/{id}", resp).await);
+    }
+
+    let raw = resp
         .json::<RawTrackDetails>()
         .await
         .context("parsing track response")?;

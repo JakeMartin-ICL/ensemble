@@ -121,8 +121,12 @@ export const joinPartySession = (room_code: string, display_name?: string) =>
 export const getPartySession = (id: string) =>
   get<PartySession>(`/party/sessions/${id}`)
 
+export interface PartyPlaybackState extends PlaybackState {
+  observed_at_ms: number
+}
+
 export const getPartyPlayback = (id: string) =>
-  get<PlaybackState | null>(`/party/sessions/${id}/playback`)
+  get<PartyPlaybackState | null>(`/party/sessions/${id}/playback`)
 
 export const pausePartySession = (id: string) =>
   post<PlaybackState | null>(`/party/sessions/${id}/pause`, {})
@@ -176,6 +180,14 @@ export function getPartyLibraryTracks(limit = 1500): Promise<PartySearchResponse
     .then((response) => {
       writePartyLibraryCache(cacheKey, response)
       return response
+    })
+    .catch((e: unknown) => {
+      console.error('Spotify playlist search is unavailable', {
+        endpoint: '/party/library/tracks',
+        limit,
+        error: e,
+      })
+      throw e
     })
     .finally(() => { libraryRequests.delete(cacheKey) })
 

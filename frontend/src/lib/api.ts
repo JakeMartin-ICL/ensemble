@@ -5,6 +5,14 @@ const BASE_URL: string = _apiUrl
 function authHeaders(path: string): Record<string, string> {
   const partyGuestToken = path.startsWith('/party') ? localStorage.getItem('party_guest_session_token') : null
   const token = partyGuestToken ?? localStorage.getItem('session_token')
+  if (import.meta.env.DEV && path.includes('/queue/search')) {
+    console.debug('[api] search auth', {
+      path,
+      tokenSource: partyGuestToken ? 'party_guest_session_token' : token ? 'session_token' : 'none',
+      hasPartyGuestToken: Boolean(partyGuestToken),
+      hasSessionToken: Boolean(localStorage.getItem('session_token')),
+    })
+  }
   return token ? { Authorization: `Bearer ${token}` } : {}
 }
 
