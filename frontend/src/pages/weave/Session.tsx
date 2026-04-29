@@ -58,6 +58,7 @@ export default function WeaveSession() {
   const [playerPromptOpen, setPlayerPromptOpen] = useState(false)
   const pausedObservationCountRef = useRef(0)
   const lastPausedObservedAtRef = useRef<number | null>(null)
+  const lastForegroundRefreshAtRef = useRef(0)
   const navigate = useNavigate()
 
   const playlistColors = useMemo<Map<string, string>>(() => {
@@ -139,6 +140,41 @@ export default function WeaveSession() {
     const interval = window.setInterval(() => { setNow(Date.now()) }, 250)
     return () => { window.clearInterval(interval) }
   }, [])
+
+  useEffect(() => {
+    if (!session?.id) return
+    const sessionId = session.id
+
+    function refreshAfterForeground() {
+      if (document.visibilityState !== 'visible') return
+      const nowMs = Date.now()
+      if (nowMs - lastForegroundRefreshAtRef.current < 1_000) return
+      lastForegroundRefreshAtRef.current = nowMs
+      wakeHeartbeatUi()
+      void restartHeartbeat(sessionId)
+        .then((p) => {
+          setPlaybackError(null)
+          setPlayerPromptOpen(false)
+          setPlayback(p ? { ...p, observed_at: p.observed_at_ms } : null)
+        })
+        .catch((e: unknown) => {
+          const message = errorMessage(e)
+          if (isSpotifyPlayerActivationError(message)) {
+            setPlaybackError(null)
+            setPlayerPromptOpen(true)
+          } else {
+            setPlaybackError(message)
+          }
+        })
+    }
+
+    window.addEventListener('pageshow', refreshAfterForeground)
+    document.addEventListener('visibilitychange', refreshAfterForeground)
+    return () => {
+      window.removeEventListener('pageshow', refreshAfterForeground)
+      document.removeEventListener('visibilitychange', refreshAfterForeground)
+    }
+  }, [session?.id])
 
   // Load track details whenever current_track_uri changes
   useEffect(() => {
@@ -320,6 +356,15 @@ export default function WeaveSession() {
       })
   }
 
+  function handleOpenSpotify() {
+    window.location.href = 'spotify://'
+    window.setTimeout(() => {
+      if (document.visibilityState === 'visible') {
+        window.location.href = 'https://open.spotify.com/'
+      }
+    }, 800)
+  }
+
   function wakeHeartbeatUi(ignorePausedObservedAt: number | null = null) {
     pausedObservationCountRef.current = 0
     lastPausedObservedAtRef.current = ignorePausedObservedAt
@@ -498,16 +543,16 @@ export default function WeaveSession() {
           onClick={() => { setPlayerPromptOpen(false) }}
           role="dialog"
           aria-modal="true"
-          aria-label="Start Spotify playback"
+          aria-label="Reactivate Spotify"
         >
           <div
             className={`${styles.dialogPanel} ${styles.dialogPanelCompact} ${styles.spotifyPlayerDialog}`}
             onClick={(e) => { e.stopPropagation() }}
           >
-            <p className={styles.dialogConfirmText}>Start Spotify first</p>
+            <p className={styles.dialogConfirmText}>Reactivate Spotify</p>
             <p className={styles.dialogConfirmSub}>
-              Open Spotify on your phone, desktop app, or web player and start playing anything.
-              Then return here and click OK.
+              iOS may stop Spotify when it has been paused in the background. Open Spotify,
+              start playback once, then return here.
             </p>
             <div className={styles.dialogConfirmBtns}>
               <button
@@ -518,11 +563,18 @@ export default function WeaveSession() {
                 Cancel
               </button>
               <button
+                className={styles.ghostBtn}
+                onClick={handleOpenSpotify}
+                type="button"
+              >
+                Open Spotify
+              </button>
+              <button
                 className={styles.primaryBtn}
                 onClick={handleRetryPlayerActivation}
                 type="button"
               >
-                OK
+                Try again
               </button>
             </div>
           </div>
