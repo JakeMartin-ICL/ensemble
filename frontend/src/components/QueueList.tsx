@@ -135,6 +135,9 @@ export default function QueueList<T extends PositionedItem>({
       } else if (y > window.innerHeight - threshold) {
         window.scrollBy(0, Math.round(((y - (window.innerHeight - threshold)) / threshold) * speed))
       }
+      if (dragKeyRef.current) {
+        setDragDelta(lastYRef.current - startYRef.current + (window.scrollY - scrollAtStartRef.current))
+      }
       scrollRafRef.current = requestAnimationFrame(tick)
     }
     scrollRafRef.current = requestAnimationFrame(tick)
@@ -361,7 +364,7 @@ export default function QueueList<T extends PositionedItem>({
     }
 
     if (!dragKeyRef.current || getKey(item) !== dragKeyRef.current) return
-    deltaPendingRef.current = e.clientY - startYRef.current
+    deltaPendingRef.current = e.clientY - startYRef.current + (window.scrollY - scrollAtStartRef.current)
 
     setTopHot(isPointerOverTopZone(e.clientX, e.clientY))
     setRemoveHot(isPointerOverRemoveZone(e.clientX, e.clientY))
@@ -441,8 +444,13 @@ export default function QueueList<T extends PositionedItem>({
             itemStyle.zIndex = 10
             itemStyle.position = 'relative'
             itemStyle.transition = 'none'
-          } else if (shiftY !== 0) {
-            itemStyle.transform = `translate3d(0, ${shiftY.toString()}px, 0)`
+          } else {
+            if (shiftY !== 0) {
+              itemStyle.transform = `translate3d(0, ${shiftY.toString()}px, 0)`
+            }
+            if (dragKey !== null) {
+              itemStyle.transition = 'transform 200ms cubic-bezier(0.2, 0.8, 0.2, 1)'
+            }
           }
 
           return (
