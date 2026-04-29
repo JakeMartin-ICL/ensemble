@@ -1221,7 +1221,7 @@ function PartyQueuePanel({
           pulseKey={duplicatePulse?.itemId}
           pulseToken={duplicatePulse?.token}
           onReorder={onReorder}
-          onTopDrop={canEditQueue && session.mode !== 'voted_queue' ? (item) => { onReorder(item, 0) } : undefined}
+          onTopDrop={canEditQueue ? (item) => { onReorder(item, 0) } : undefined}
           onRemoveDrop={canEditQueue ? onRemove : undefined}
           removeDropLabel="Remove"
           renderActions={(item) => (

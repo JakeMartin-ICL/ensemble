@@ -856,6 +856,7 @@ function QueuePanel({
           getColor={(item) => playlistColors.get(item.playlist_id) ?? '#c084fc'}
           renderItem={(item) => <QueueTrackLabel item={item} />}
           reorderScope="group"
+          onTopDrop={(item) => { onReorder(item, 0) }}
         />
       ) : activePlaylist ? (
         <QueueList
@@ -864,6 +865,7 @@ function QueuePanel({
           getKey={(item) => `${item.playlist_id}:${item.position.toString()}`}
           getColor={(item) => playlistColors.get(item.playlist_id) ?? '#c084fc'}
           renderItem={(item) => <QueueTrackLabel item={item} />}
+          onTopDrop={(item) => { onReorder(item, 0) }}
         />
       ) : null}
     </section>
