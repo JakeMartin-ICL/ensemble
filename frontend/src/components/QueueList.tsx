@@ -453,6 +453,7 @@ export default function QueueList<T extends PositionedItem>({
               onPointerMove={(e) => { handlePointerMove(e, item) }}
               onPointerUp={(e) => { handlePointerUp(e, item) }}
               onPointerCancel={(e) => { handlePointerCancel(e) }}
+              onContextMenu={(e) => { if (canReorder) e.preventDefault() }}
             >
               {renderItem(item)}
               {renderActions?.(item)}
