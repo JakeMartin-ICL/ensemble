@@ -263,8 +263,8 @@ export default function QueueList<T extends PositionedItem>({
           el.getAnimations().forEach((animation) => { animation.cancel() })
           el.animate(
             [
-              { transform: `translateY(${deltaY.toString()}px)` },
-              { transform: 'translateY(0)' },
+              { transform: `translate3d(0, ${deltaY.toString()}px, 0)` },
+              { transform: 'translate3d(0, 0, 0)' },
             ],
             {
               duration: 240,
@@ -276,8 +276,8 @@ export default function QueueList<T extends PositionedItem>({
         el.getAnimations().forEach((animation) => { animation.cancel() })
         el.animate(
           [
-            { opacity: 0, transform: 'translateY(10px) scale(0.98)' },
-            { opacity: 1, transform: 'translateY(0) scale(1)' },
+            { opacity: 0, transform: 'translate3d(0, 10px, 0) scale(0.98)' },
+            { opacity: 1, transform: 'translate3d(0, 0, 0) scale(1)' },
           ],
           {
             duration: 220,
@@ -427,12 +427,12 @@ export default function QueueList<T extends PositionedItem>({
           } as React.CSSProperties
 
           if (isDragging) {
-            itemStyle.transform = `translateY(${dragDelta.toString()}px) scale(1.03)`
+            itemStyle.transform = `translate3d(0, ${dragDelta.toString()}px, 0) scale(1.03)`
             itemStyle.zIndex = 10
             itemStyle.position = 'relative'
             itemStyle.transition = 'none'
           } else if (shiftY !== 0) {
-            itemStyle.transform = `translateY(${shiftY.toString()}px)`
+            itemStyle.transform = `translate3d(0, ${shiftY.toString()}px, 0)`
           }
 
           return (

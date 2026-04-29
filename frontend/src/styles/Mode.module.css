@@ -1260,7 +1260,8 @@
   border-left: 3px solid var(--item-color, var(--border-subtle));
   border-radius: 10px;
   cursor: grab;
-  transition: border-color 0.15s ease, background 0.15s ease, opacity 0.15s ease, transform 0.2s ease;
+  transform: translateZ(0);
+  transition: border-color 0.15s ease, background 0.15s ease, opacity 0.15s ease;
 }
 
 .queueItemStatic {
