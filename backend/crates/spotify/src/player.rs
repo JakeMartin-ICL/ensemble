@@ -220,6 +220,19 @@ struct PlayRequest {
     uris: Vec<String>,
 }
 
+fn controllable_device(devices: &[ActiveDevice]) -> anyhow::Result<&ActiveDevice> {
+    devices
+        .iter()
+        .filter(|d| !d.is_restricted)
+        .find(|d| d.is_active && d.id.is_some())
+        .or_else(|| devices.iter().find(|d| !d.is_restricted && d.id.is_some()))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Spotify has no available playback device. Open Spotify on a phone, desktop app, or web player, then try again."
+            )
+        })
+}
+
 pub async fn start_track(access_token: &str, track_uri: &str) -> anyhow::Result<()> {
     start_tracks(access_token, &[track_uri.to_string()]).await
 }
@@ -241,22 +254,13 @@ pub async fn resume_playback(access_token: &str) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    if resp.status() != reqwest::StatusCode::NOT_FOUND {
-        return Err(crate::spotify_error("/v1/me/player/play (resume)", resp).await);
+    let play_error = crate::spotify_api_error("/v1/me/player/play (resume)", resp).await;
+    if !play_error.should_retry_with_device() {
+        return Err(play_error.into());
     }
 
     let devices = get_available_devices(access_token).await?;
-    let Some(device) = devices
-        .iter()
-        .filter(|d| !d.is_restricted)
-        .find(|d| d.is_active && d.id.is_some())
-        .or_else(|| devices.iter().find(|d| !d.is_restricted && d.id.is_some()))
-    else {
-        anyhow::bail!(
-            "Spotify has no available playback device. Open Spotify on a phone, desktop app, or web player, then try again."
-        );
-    };
-
+    let device = controllable_device(&devices)?;
     let Some(device_id) = device.id.as_deref() else {
         anyhow::bail!(
             "Spotify found a playback device but did not provide a controllable device id. Open Spotify on another device, then try again."
@@ -275,6 +279,11 @@ pub async fn resume_playback(access_token: &str) -> anyhow::Result<()> {
         .context("resuming playback on available device")?;
 
     if resp.status().is_success() {
+        tracing::info!(
+            device_name = device.name,
+            device_type = device.device_type,
+            "resumed Spotify playback on available device"
+        );
         return Ok(());
     }
 
@@ -342,22 +351,13 @@ pub async fn start_tracks(access_token: &str, track_uris: &[String]) -> anyhow::
         return Ok(());
     }
 
-    if resp.status() != reqwest::StatusCode::NOT_FOUND {
-        return Err(crate::spotify_error("/v1/me/player/play (start)", resp).await);
+    let play_error = crate::spotify_api_error("/v1/me/player/play (start)", resp).await;
+    if !play_error.should_retry_with_device() {
+        return Err(play_error.into());
     }
 
     let devices = get_available_devices(access_token).await?;
-    let Some(device) = devices
-        .iter()
-        .filter(|d| !d.is_restricted)
-        .find(|d| d.is_active && d.id.is_some())
-        .or_else(|| devices.iter().find(|d| !d.is_restricted && d.id.is_some()))
-    else {
-        anyhow::bail!(
-            "Spotify has no available playback device. Open Spotify on a phone, desktop app, or web player, then try again."
-        );
-    };
-
+    let device = controllable_device(&devices)?;
     let Some(device_id) = device.id.as_deref() else {
         anyhow::bail!(
             "Spotify found a playback device but did not provide a controllable device id. Open Spotify on another device, then try again."

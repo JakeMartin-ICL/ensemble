@@ -32,6 +32,14 @@
   color: #f87171;
 }
 
+.inlineError {
+  width: min(400px, calc(100vw - 48px));
+  margin: -8px 0 0;
+  color: #f87171;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
 /* ── Setup ── */
 
 .setupGrid {
@@ -1261,6 +1269,9 @@
   border-radius: 10px;
   cursor: grab;
   transform: translateZ(0);
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
   transition: border-color 0.15s ease, background 0.15s ease, opacity 0.15s ease;
 }
 

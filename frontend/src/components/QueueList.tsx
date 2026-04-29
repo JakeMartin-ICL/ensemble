@@ -73,6 +73,7 @@ export default function QueueList<T extends PositionedItem>({
   const getKeyRef = useRef(getKey)
   const getColorRef = useRef(getColor)
   const wasDraggingRef = useRef(false)
+  const touchMoveCleanupRef = useRef<(() => void) | null>(null)
 
   dragKeyRef.current = dragKey
   getKeyRef.current = getKey
@@ -166,6 +167,8 @@ export default function QueueList<T extends PositionedItem>({
     setTopHot(false)
     setRemoveHot(false)
     stopAutoScroll()
+    touchMoveCleanupRef.current?.()
+    touchMoveCleanupRef.current = null
   }
 
   useEffect(() => resetDrag, [])
@@ -331,6 +334,13 @@ export default function QueueList<T extends PositionedItem>({
 
     const el = e.currentTarget
     if (e.pointerType === 'touch') {
+      const onTouchMove = (te: TouchEvent) => {
+        if (dragKeyRef.current !== null) te.preventDefault()
+      }
+      touchMoveCleanupRef.current?.()
+      document.addEventListener('touchmove', onTouchMove, { passive: false })
+      touchMoveCleanupRef.current = () => { document.removeEventListener('touchmove', onTouchMove) }
+
       holdTimerRef.current = setTimeout(() => {
         holdTimerRef.current = null
         if (!movedRef.current && pointerIdRef.current === e.pointerId) activate(el, item, e.pointerId)

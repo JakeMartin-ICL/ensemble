@@ -18,6 +18,13 @@ pub(crate) struct SpotifyApiError {
 
 impl std::fmt::Display for SpotifyApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.status == reqwest::StatusCode::FORBIDDEN && self.body.contains("Restriction violated") {
+            return write!(
+                f,
+                "Spotify rejected the play command. Open Spotify on the active device and press play there once, then return to Ensemble."
+            );
+        }
+
         write!(f, "Spotify {} returned {}", self.operation, self.status)?;
         if let Some(retry_after) = &self.retry_after {
             write!(f, " (retry after {retry_after}s)")?;
@@ -31,7 +38,18 @@ impl std::fmt::Display for SpotifyApiError {
 
 impl std::error::Error for SpotifyApiError {}
 
-pub(crate) async fn spotify_error(operation: &'static str, resp: reqwest::Response) -> anyhow::Error {
+impl SpotifyApiError {
+    pub(crate) fn should_retry_with_device(&self) -> bool {
+        self.status == reqwest::StatusCode::NOT_FOUND
+            || (self.status == reqwest::StatusCode::FORBIDDEN
+                && self.body.contains("Restriction violated"))
+    }
+}
+
+pub(crate) async fn spotify_api_error(
+    operation: &'static str,
+    resp: reqwest::Response,
+) -> SpotifyApiError {
     let status = resp.status();
     let retry_after = resp
         .headers()
@@ -39,5 +57,9 @@ pub(crate) async fn spotify_error(operation: &'static str, resp: reqwest::Respon
         .and_then(|v| v.to_str().ok())
         .map(ToOwned::to_owned);
     let body = resp.text().await.unwrap_or_default();
-    SpotifyApiError { operation, status, retry_after, body }.into()
+    SpotifyApiError { operation, status, retry_after, body }
+}
+
+pub(crate) async fn spotify_error(operation: &'static str, resp: reqwest::Response) -> anyhow::Error {
+    spotify_api_error(operation, resp).await.into()
 }

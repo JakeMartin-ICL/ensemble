@@ -53,6 +53,8 @@ export default function WeaveSession() {
   const [heartbeatIdle, setHeartbeatIdle] = useState(false)
   const [now, setNow] = useState(() => Date.now())
   const [error, setError] = useState<string | null>(null)
+  const [playbackError, setPlaybackError] = useState<string | null>(null)
+  const [playerPromptOpen, setPlayerPromptOpen] = useState(false)
   const pausedObservationCountRef = useRef(0)
   const lastPausedObservedAtRef = useRef<number | null>(null)
   const navigate = useNavigate()
@@ -110,7 +112,7 @@ export default function WeaveSession() {
           : Infinity
         timerId = window.setTimeout(poll, remaining <= 10_000 ? 1_000 : 10_000)
       }).catch((e: unknown) => {
-        setError(e instanceof Error ? e.message : String(e))
+        setPlaybackError(errorMessage(e))
         timerId = window.setTimeout(poll, 10_000)
       })
     }
@@ -224,29 +226,76 @@ export default function WeaveSession() {
 
   function handlePlayPause() {
     if (!session) return
-    const action = playback?.is_playing ? pauseSession : resumeSession
+    const wasPlaying = playback?.is_playing ?? false
+    const action = wasPlaying ? pauseSession : resumeSession
     wakeHeartbeatUi()
+    setPlaybackError(null)
+    setPlayerPromptOpen(false)
     setPlayback(optimisticTogglePlaying)
     void action(session.id)
-      .then((p) => { setPlayback(p ? { ...p, observed_at: p.observed_at_ms } : null) })
-      .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
+      .then((p) => {
+        setPlaybackError(null)
+        setPlayerPromptOpen(false)
+        setPlayback(p ? { ...p, observed_at: p.observed_at_ms } : null)
+      })
+      .catch((e: unknown) => {
+        const message = errorMessage(e)
+        setPlayback((current) => current ? { ...current, is_playing: wasPlaying } : current)
+        if (isSpotifyPlayerActivationError(message)) {
+          setPlayerPromptOpen(true)
+        } else {
+          setPlaybackError(message)
+        }
+        void getPlayback(session.id)
+          .then((p) => { setPlayback(p ? { ...p, observed_at: p.observed_at_ms } : null) })
+          .catch(() => undefined)
+      })
   }
 
   function handleRestart() {
     if (!session) return
     wakeHeartbeatUi()
+    setPlaybackError(null)
+    setPlayerPromptOpen(false)
     setPlayback(optimisticRestart)
     void restartSession(session.id)
-      .then((p) => { setPlayback(p ? { ...p, observed_at: p.observed_at_ms } : null) })
-      .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
+      .then((p) => {
+        setPlaybackError(null)
+        setPlayerPromptOpen(false)
+        setPlayback(p ? { ...p, observed_at: p.observed_at_ms } : null)
+      })
+      .catch((e: unknown) => {
+        const message = errorMessage(e)
+        if (isSpotifyPlayerActivationError(message)) {
+          setPlayerPromptOpen(true)
+        } else {
+          setPlaybackError(message)
+        }
+        void getPlayback(session.id)
+          .then((p) => { setPlayback(p ? { ...p, observed_at: p.observed_at_ms } : null) })
+          .catch(() => undefined)
+      })
   }
 
   function handleRefreshHeartbeat() {
     if (!session) return
     wakeHeartbeatUi(playback?.observed_at ?? null)
+    setPlaybackError(null)
+    setPlayerPromptOpen(false)
     void restartHeartbeat(session.id)
-      .then((p) => { setPlayback(p ? { ...p, observed_at: p.observed_at_ms } : null) })
-      .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
+      .then((p) => {
+        setPlaybackError(null)
+        setPlayerPromptOpen(false)
+        setPlayback(p ? { ...p, observed_at: p.observed_at_ms } : null)
+      })
+      .catch((e: unknown) => {
+        const message = errorMessage(e)
+        if (isSpotifyPlayerActivationError(message)) {
+          setPlayerPromptOpen(true)
+        } else {
+          setPlaybackError(message)
+        }
+      })
   }
 
   function wakeHeartbeatUi(ignorePausedObservedAt: number | null = null) {
@@ -397,6 +446,7 @@ export default function WeaveSession() {
             </button>
           )}
         </div>
+        {playbackError && <p className={styles.inlineError}>{playbackError}</p>}
       </div>
 
       {queueOpen && queue && (
@@ -410,8 +460,55 @@ export default function WeaveSession() {
       )}
 
       <button className={styles.endBtn} onClick={handleEnd}>End session</button>
+
+      {playerPromptOpen && (
+        <div
+          className={styles.dialogOverlay}
+          onClick={() => { setPlayerPromptOpen(false) }}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Start Spotify playback"
+        >
+          <div
+            className={`${styles.dialogPanel} ${styles.dialogPanelCompact} ${styles.spotifyPlayerDialog}`}
+            onClick={(e) => { e.stopPropagation() }}
+          >
+            <p className={styles.dialogConfirmText}>Start Spotify first</p>
+            <p className={styles.dialogConfirmSub}>
+              Open Spotify on your phone, desktop app, or web player and start playing anything.
+              Then return here and click OK.
+            </p>
+            <div className={styles.dialogConfirmBtns}>
+              <button
+                className={styles.ghostBtn}
+                onClick={() => { setPlayerPromptOpen(false) }}
+                type="button"
+              >
+                Cancel
+              </button>
+              <button
+                className={styles.primaryBtn}
+                onClick={handlePlayPause}
+                type="button"
+              >
+                OK
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
+}
+
+function errorMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e)
+}
+
+function isSpotifyPlayerActivationError(message: string): boolean {
+  return message.includes('Spotify has no available playback device')
+    || message.includes('Spotify found a playback device but did not provide a controllable device id')
+    || message.includes('Spotify rejected the play command')
 }
 
 function sessionFromRealtimeRow(row: unknown): Session | null {
