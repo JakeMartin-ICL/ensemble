@@ -545,8 +545,16 @@ pub async fn balanced_queue_items(
     pool: &PgPool,
     session_id: Uuid,
 ) -> anyhow::Result<Vec<PartyQueueItem>> {
+    balanced_queue_items_after(pool, session_id, None).await
+}
+
+pub async fn balanced_queue_items_after(
+    pool: &PgPool,
+    session_id: Uuid,
+    after_owner_key: Option<&str>,
+) -> anyhow::Result<Vec<PartyQueueItem>> {
     let items = queue_items(pool, session_id).await?;
-    Ok(balanced_order_queue_items(items))
+    Ok(balanced_order_queue_items(items, after_owner_key))
 }
 
 pub async fn first_queue_item(
@@ -575,11 +583,48 @@ pub async fn first_queue_item(
 pub async fn first_balanced_queue_item(
     pool: &PgPool,
     session_id: Uuid,
+    after_owner_key: Option<&str>,
 ) -> anyhow::Result<Option<PartyQueueItem>> {
-    Ok(balanced_queue_items(pool, session_id)
-        .await?
-        .into_iter()
-        .next())
+    Ok(
+        balanced_queue_items_after(pool, session_id, after_owner_key)
+            .await?
+            .into_iter()
+            .next(),
+    )
+}
+
+pub async fn current_track_owner_key(
+    pool: &PgPool,
+    session_id: Uuid,
+    current_track_uri: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    let Some(current_track_uri) = current_track_uri else {
+        return Ok(None);
+    };
+
+    #[derive(sqlx::FromRow)]
+    struct OwnerRow {
+        added_by_user_id: Option<Uuid>,
+        added_by_guest_id: Option<Uuid>,
+    }
+
+    let owner = sqlx::query_as::<_, OwnerRow>(
+        r#"
+        SELECT added_by_user_id, added_by_guest_id
+        FROM public.party_played_tracks
+        WHERE session_id = $1 AND track->>'uri' = $2
+        ORDER BY play_order DESC, created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(session_id)
+    .bind(current_track_uri)
+    .fetch_optional(pool)
+    .await
+    .context("fetching current party track owner")?;
+
+    Ok(owner
+        .and_then(|owner| queue_owner_key_parts(owner.added_by_user_id, owner.added_by_guest_id)))
 }
 
 pub async fn next_position(pool: &PgPool, session_id: Uuid) -> anyhow::Result<i32> {
@@ -957,8 +1002,9 @@ pub async fn pop_next_queue_item(
 pub async fn pop_next_balanced_queue_item(
     pool: &PgPool,
     session_id: Uuid,
+    after_owner_key: Option<&str>,
 ) -> anyhow::Result<Option<PartyQueueItem>> {
-    let Some(next) = first_balanced_queue_item(pool, session_id).await? else {
+    let Some(next) = first_balanced_queue_item(pool, session_id, after_owner_key).await? else {
         return Ok(None);
     };
 
@@ -1471,7 +1517,10 @@ pub async fn update_playback_state(
     Ok(())
 }
 
-fn balanced_order_queue_items(items: Vec<PartyQueueItem>) -> Vec<PartyQueueItem> {
+fn balanced_order_queue_items(
+    items: Vec<PartyQueueItem>,
+    after_owner_key: Option<&str>,
+) -> Vec<PartyQueueItem> {
     let mut groups: Vec<(String, Vec<PartyQueueItem>)> = Vec::new();
 
     for item in items {
@@ -1503,6 +1552,16 @@ fn balanced_order_queue_items(items: Vec<PartyQueueItem>) -> Vec<PartyQueueItem>
         }
     });
 
+    if let Some(after_owner_key) = after_owner_key {
+        if let Some(index) = groups
+            .iter()
+            .position(|(group_key, _)| group_key == after_owner_key)
+        {
+            let next_index = (index + 1) % groups.len();
+            groups.rotate_left(next_index);
+        }
+    }
+
     let mut ordered = Vec::new();
     loop {
         let mut added = false;
@@ -1521,11 +1580,17 @@ fn balanced_order_queue_items(items: Vec<PartyQueueItem>) -> Vec<PartyQueueItem>
 }
 
 fn queue_owner_key(item: &PartyQueueItem) -> String {
-    if let Some(id) = item.added_by_user_id {
-        format!("user:{id}")
-    } else if let Some(id) = item.added_by_guest_id {
-        format!("guest:{id}")
+    queue_owner_key_parts(item.added_by_user_id, item.added_by_guest_id)
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn queue_owner_key_parts(
+    added_by_user_id: Option<Uuid>,
+    added_by_guest_id: Option<Uuid>,
+) -> Option<String> {
+    if let Some(id) = added_by_user_id {
+        Some(format!("user:{id}"))
     } else {
-        "unknown".to_string()
+        added_by_guest_id.map(|id| format!("guest:{id}"))
     }
 }
