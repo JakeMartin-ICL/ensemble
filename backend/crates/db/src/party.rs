@@ -2,7 +2,7 @@
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
-use sqlx::{types::Json, PgPool};
+use sqlx::{types::Json, PgConnection, PgPool};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1016,28 +1016,35 @@ pub async fn remove_first_queue_item_by_uri(
 }
 
 pub async fn refill_queue_from_source(pool: &PgPool, session_id: Uuid) -> anyhow::Result<()> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("starting party source refill transaction")?;
+
     let min_queue_size = sqlx::query_scalar::<_, i32>(
-        "SELECT source_min_queue_size FROM public.party_sessions WHERE id = $1",
+        "SELECT source_min_queue_size FROM public.party_sessions WHERE id = $1 FOR UPDATE",
     )
     .bind(session_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
     .context("fetching party source minimum queue size")?
     .unwrap_or(0);
 
     if min_queue_size <= 0 {
+        tx.commit()
+            .await
+            .context("committing party source refill transaction")?;
         return Ok(());
     }
 
-    let mut visible_count = queue_len(pool, session_id).await?;
-    while visible_count < min_queue_size {
-        let Some(source_item) = pop_next_source_queue_item(pool, session_id).await? else {
+    while queue_len_tx(&mut tx, session_id).await? < min_queue_size {
+        let Some(source_item) = pop_next_source_queue_item_tx(&mut tx, session_id).await? else {
             break;
         };
 
-        let position = next_position(pool, session_id).await?;
-        add_queue_item(
-            pool,
+        let position = next_position_tx(&mut tx, session_id).await?;
+        insert_queue_item_tx(
+            &mut tx,
             &NewPartyQueueItem {
                 session_id,
                 position,
@@ -1047,48 +1054,85 @@ pub async fn refill_queue_from_source(pool: &PgPool, session_id: Uuid) -> anyhow
             },
         )
         .await?;
-        visible_count += 1;
     }
 
+    tx.commit()
+        .await
+        .context("committing party source refill transaction")?;
     Ok(())
 }
 
-async fn queue_len(pool: &PgPool, session_id: Uuid) -> anyhow::Result<i32> {
+async fn next_position_tx(conn: &mut PgConnection, session_id: Uuid) -> anyhow::Result<i32> {
+    let position = sqlx::query_scalar::<_, Option<i32>>(
+        "SELECT max(position) + 1 FROM public.party_queue_items WHERE session_id = $1",
+    )
+    .bind(session_id)
+    .fetch_one(conn)
+    .await
+    .context("fetching next party queue position")?
+    .unwrap_or(0);
+    Ok(position)
+}
+
+async fn insert_queue_item_tx(
+    conn: &mut PgConnection,
+    item: &NewPartyQueueItem,
+) -> anyhow::Result<PartyQueueItem> {
+    let item = sqlx::query_as::<_, PartyQueueItem>(
+        r#"
+        INSERT INTO public.party_queue_items (session_id, position, track, added_by_user_id, added_by_guest_id)
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING id, session_id, position, NULL::integer AS pin_position, track, added_by_user_id, added_by_guest_id,
+                  NULL::text AS added_by_display_name, created_at
+        "#,
+    )
+    .bind(item.session_id)
+    .bind(item.position)
+    .bind(Json(&item.track))
+    .bind(item.added_by_user_id)
+    .bind(item.added_by_guest_id)
+    .fetch_one(conn)
+    .await
+    .context("adding party queue item")?;
+    Ok(item)
+}
+
+async fn queue_len_tx(conn: &mut PgConnection, session_id: Uuid) -> anyhow::Result<i32> {
     let count = sqlx::query_scalar::<_, i64>(
         "SELECT count(*) FROM public.party_queue_items WHERE session_id = $1",
     )
     .bind(session_id)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .context("counting party queue items")?;
     i32::try_from(count).context("party queue count overflow")
 }
 
-async fn source_enabled_len(pool: &PgPool, session_id: Uuid) -> anyhow::Result<i64> {
+async fn source_enabled_len_tx(conn: &mut PgConnection, session_id: Uuid) -> anyhow::Result<i64> {
     sqlx::query_scalar::<_, i64>(
         "SELECT count(*) FROM public.party_source_queue_items WHERE session_id = $1 AND disabled = false",
     )
     .bind(session_id)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .context("counting enabled party source queue items")
 }
 
-async fn pop_next_source_queue_item(
-    pool: &PgPool,
+async fn pop_next_source_queue_item_tx(
+    conn: &mut PgConnection,
     session_id: Uuid,
 ) -> anyhow::Result<Option<PartySourceQueueItem>> {
-    let item = take_next_source_queue_item(pool, session_id).await?;
-    if item.is_some() || source_enabled_len(pool, session_id).await? == 0 {
+    let item = take_next_source_queue_item_tx(conn, session_id).await?;
+    if item.is_some() || source_enabled_len_tx(conn, session_id).await? == 0 {
         return Ok(item);
     }
 
-    reshuffle_source_queue(pool, session_id).await?;
-    take_next_source_queue_item(pool, session_id).await
+    reshuffle_source_queue_tx(conn, session_id).await?;
+    take_next_source_queue_item_tx(conn, session_id).await
 }
 
-async fn take_next_source_queue_item(
-    pool: &PgPool,
+async fn take_next_source_queue_item_tx(
+    conn: &mut PgConnection,
     session_id: Uuid,
 ) -> anyhow::Result<Option<PartySourceQueueItem>> {
     let item = sqlx::query_as::<_, PartySourceQueueItem>(
@@ -1121,13 +1165,16 @@ async fn take_next_source_queue_item(
         "#,
     )
     .bind(session_id)
-    .fetch_optional(pool)
+    .fetch_optional(conn)
     .await
     .context("taking next party source queue item")?;
     Ok(item)
 }
 
-async fn reshuffle_source_queue(pool: &PgPool, session_id: Uuid) -> anyhow::Result<()> {
+async fn reshuffle_source_queue_tx(
+    conn: &mut PgConnection,
+    session_id: Uuid,
+) -> anyhow::Result<()> {
     sqlx::query(
         r#"
         WITH ranked AS (
@@ -1142,7 +1189,7 @@ async fn reshuffle_source_queue(pool: &PgPool, session_id: Uuid) -> anyhow::Resu
         "#,
     )
     .bind(session_id)
-    .execute(pool)
+    .execute(conn)
     .await
     .context("reshuffling party source queue")?;
     Ok(())
