@@ -532,11 +532,16 @@ export default function PartySessionPage() {
       .finally(() => { setSavingGuestPlaylists(false) })
   }
 
-  function handleSourceSettingsChange(sourceMinQueueSize: number, addAddedTracksToSource: boolean) {
+  function handleSourceSettingsChange(
+    sourceMinQueueSize: number,
+    sourceInsertInterval: number,
+    addAddedTracksToSource: boolean,
+  ) {
     if (!session?.is_host || savingSourceSettings) return
     setSavingSourceSettings(true)
     void updatePartySettings(session.id, {
       source_min_queue_size: sourceMinQueueSize,
+      source_insert_interval: sourceInsertInterval,
       add_added_tracks_to_source: addAddedTracksToSource,
     })
       .then((s) => {
@@ -745,6 +750,7 @@ export default function PartySessionPage() {
                 <PartySettingsPanel
                   allowGuestPlaylistAdds={session.allow_guest_playlist_adds}
                   sourceMinQueueSize={session.source_min_queue_size}
+                  sourceInsertInterval={session.source_insert_interval}
                   addAddedTracksToSource={session.add_added_tracks_to_source}
                   showQueueAttribution={session.show_queue_attribution}
                   closing={!settingsOpen}
@@ -942,6 +948,7 @@ function applyDevGuestOverride(session: PartySession): PartySession {
 function mergePartySessionRealtimeRow(session: PartySession | null, row: Record<string, unknown>): PartySession | null {
   if (!session || row.id !== session.id) return session
   const sourceMinQueueSize = numericRealtimeValue(row.source_min_queue_size)
+  const sourceInsertInterval = numericRealtimeValue(row.source_insert_interval)
   return {
     ...session,
     mode: isPartyMode(row.mode) ? row.mode : session.mode,
@@ -949,6 +956,7 @@ function mergePartySessionRealtimeRow(session: PartySession | null, row: Record<
       ? row.allow_guest_playlist_adds
       : session.allow_guest_playlist_adds,
     source_min_queue_size: sourceMinQueueSize ?? session.source_min_queue_size,
+    source_insert_interval: sourceInsertInterval ?? session.source_insert_interval,
     add_added_tracks_to_source: typeof row.add_added_tracks_to_source === 'boolean'
       ? row.add_added_tracks_to_source
       : session.add_added_tracks_to_source,
@@ -1529,6 +1537,7 @@ function PartyExportPanel({
 function PartySettingsPanel({
   allowGuestPlaylistAdds,
   sourceMinQueueSize,
+  sourceInsertInterval,
   addAddedTracksToSource,
   showQueueAttribution,
   closing,
@@ -1541,6 +1550,7 @@ function PartySettingsPanel({
 }: {
   allowGuestPlaylistAdds: boolean
   sourceMinQueueSize: number
+  sourceInsertInterval: number
   addAddedTracksToSource: boolean
   showQueueAttribution: boolean
   closing: boolean
@@ -1548,7 +1558,11 @@ function PartySettingsPanel({
   savingSourceSettings: boolean
   savingAttribution: boolean
   onGuestPlaylistAddsChange: (allowGuestPlaylistAdds: boolean) => void
-  onSourceSettingsChange: (sourceMinQueueSize: number, addAddedTracksToSource: boolean) => void
+  onSourceSettingsChange: (
+    sourceMinQueueSize: number,
+    sourceInsertInterval: number,
+    addAddedTracksToSource: boolean,
+  ) => void
   onAttributionChange: (showQueueAttribution: boolean) => void
 }) {
   return (
@@ -1579,6 +1593,7 @@ function PartySettingsPanel({
             onChange={(e) => {
               onSourceSettingsChange(
                 clampInt(e.target.value, 0, 25),
+                sourceInsertInterval,
                 addAddedTracksToSource,
               )
             }}
@@ -1587,9 +1602,31 @@ function PartySettingsPanel({
           />
         </span>
       </label>
+      <label className={`${styles.partyModeOption} ${styles.partySettingOption}`}>
+        <span className={styles.partyModeIcon}><ShuffleIcon /></span>
+        <span>
+          <span className={styles.partyModeTitle}>Source cadence</span>
+          <input
+            className={styles.partySettingInput}
+            type="number"
+            min="0"
+            max="25"
+            value={sourceInsertInterval}
+            onChange={(e) => {
+              onSourceSettingsChange(
+                sourceMinQueueSize,
+                clampInt(e.target.value, 0, 25),
+                addAddedTracksToSource,
+              )
+            }}
+            disabled={savingSourceSettings}
+            aria-label="Source insert interval"
+          />
+        </span>
+      </label>
       <button
         className={`${styles.partyModeOption} ${styles.partySettingOption}${addAddedTracksToSource ? ` ${styles.partyModeOptionActive}` : ''}`}
-        onClick={() => { onSourceSettingsChange(sourceMinQueueSize, !addAddedTracksToSource) }}
+        onClick={() => { onSourceSettingsChange(sourceMinQueueSize, sourceInsertInterval, !addAddedTracksToSource) }}
         disabled={savingSourceSettings}
         type="button"
         aria-pressed={addAddedTracksToSource}
@@ -2211,7 +2248,7 @@ function balancedQueueTabs(items: PartyQueueItem[], session: PartySession): { ke
   tabs.set(ownKey, session.is_host ? 'Host' : 'Mine')
 
   for (const item of items) {
-    if (item.queue_owner_key === 'unknown') continue
+    if (item.queue_owner_key === 'unknown' || item.queue_owner_key === 'source') continue
     if (item.queue_owner_key === ownKey) {
       tabs.set(item.queue_owner_key, session.is_host ? 'Host' : 'Mine')
     } else if (items.some((candidate) => candidate.queue_owner_key === item.queue_owner_key)) {

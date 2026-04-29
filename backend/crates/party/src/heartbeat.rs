@@ -116,10 +116,11 @@ impl HeartbeatDriver for PartyHeartbeat {
                 },
             )
             .await?;
-            db::party::refill_queue_from_source(&self.pool, self.session_id).await?;
             if session.mode == db::party::PartyMode::VotedQueue.as_str() {
                 db::party::sort_voted_queue(&self.pool, self.session_id).await?;
+                db::party::refill_queue_from_source(&self.pool, self.session_id).await?;
             } else if session.mode == db::party::PartyMode::BalancedQueue.as_str() {
+                db::party::refill_queue_from_source(&self.pool, self.session_id).await?;
                 let owner_key = db::party::current_track_owner_key(
                     &self.pool,
                     self.session_id,
@@ -134,6 +135,8 @@ impl HeartbeatDriver for PartyHeartbeat {
                 .await?;
                 let ids = items.iter().map(|item| item.id).collect::<Vec<_>>();
                 db::party::update_queue_positions(&self.pool, self.session_id, &ids).await?;
+            } else {
+                db::party::refill_queue_from_source(&self.pool, self.session_id).await?;
             }
             Ok(())
         })
@@ -144,9 +147,11 @@ impl HeartbeatDriver for PartyHeartbeat {
         session: &'a Self::Session,
     ) -> BoxFuture<'a, anyhow::Result<Option<String>>> {
         Box::pin(async move {
-            db::party::refill_queue_from_source(&self.pool, self.session_id).await?;
             if session.mode == db::party::PartyMode::VotedQueue.as_str() {
                 db::party::sort_voted_queue(&self.pool, self.session_id).await?;
+                db::party::refill_queue_from_source(&self.pool, self.session_id).await?;
+            } else {
+                db::party::refill_queue_from_source(&self.pool, self.session_id).await?;
             }
             let item = if session.mode == db::party::PartyMode::BalancedQueue.as_str() {
                 let owner_key = db::party::current_track_owner_key(

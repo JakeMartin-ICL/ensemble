@@ -113,6 +113,7 @@ struct SessionResponse {
     mode: String,
     allow_guest_playlist_adds: bool,
     source_min_queue_size: i32,
+    source_insert_interval: i32,
     add_added_tracks_to_source: bool,
     show_queue_attribution: bool,
     current_track_uri: Option<String>,
@@ -127,6 +128,7 @@ struct SessionResponse {
 struct CreateSessionBody {
     source_playlist_id: Option<String>,
     source_min_queue_size: Option<i32>,
+    source_insert_interval: Option<i32>,
     add_added_tracks_to_source: Option<bool>,
 }
 
@@ -200,6 +202,7 @@ struct QueueItemResponse {
     voters: Vec<VoterResponse>,
     added_by_user_id: Option<Uuid>,
     added_by_guest_id: Option<Uuid>,
+    from_source_queue: bool,
     added_by_display_name: Option<String>,
     queue_owner_key: String,
     queue_owner_name: String,
@@ -324,6 +327,7 @@ struct UpdateModeBody {
 struct UpdateSettingsBody {
     allow_guest_playlist_adds: Option<bool>,
     source_min_queue_size: Option<i32>,
+    source_insert_interval: Option<i32>,
     add_added_tracks_to_source: Option<bool>,
     show_queue_attribution: Option<bool>,
 }
@@ -496,6 +500,7 @@ async fn create_session(
                 host_user_id: user_id,
                 room_code,
                 source_min_queue_size,
+                source_insert_interval: body.source_insert_interval.unwrap_or(0).clamp(0, 25),
                 add_added_tracks_to_source: body.add_added_tracks_to_source.unwrap_or(false),
             },
         )
@@ -891,6 +896,9 @@ async fn update_mode(
     let session = db::party::set_mode(&state.pool, session_id, mode)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    db::party::refill_queue_from_source(&state.pool, session_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     Ok(Json(session_response(session, &actor, None)))
 }
@@ -913,13 +921,19 @@ async fn update_settings(
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
-    if body.source_min_queue_size.is_some() || body.add_added_tracks_to_source.is_some() {
+    if body.source_min_queue_size.is_some()
+        || body.source_insert_interval.is_some()
+        || body.add_added_tracks_to_source.is_some()
+    {
         let existing = get_existing_session(&state, session_id).await?;
         db::party::set_source_settings(
             &state.pool,
             session_id,
             body.source_min_queue_size
                 .unwrap_or(existing.source_min_queue_size)
+                .clamp(0, 25),
+            body.source_insert_interval
+                .unwrap_or(existing.source_insert_interval)
                 .clamp(0, 25),
             body.add_added_tracks_to_source
                 .unwrap_or(existing.add_added_tracks_to_source),
@@ -1031,6 +1045,7 @@ async fn add_queue_track(
             position,
             added_by_user_id: actor.user_id(),
             added_by_guest_id: actor.guest_id(),
+            from_source_queue: false,
             track: track.clone(),
         },
     )
@@ -1063,6 +1078,9 @@ async fn add_queue_track(
             .await
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
+    db::party::refill_queue_from_source(&state.pool, session_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     Ok(Json(
         build_queue_response(&state, session_id, &actor).await?,
@@ -1245,6 +1263,9 @@ async fn reorder_queue(
             .await
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
+    db::party::refill_queue_from_source(&state.pool, session_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     Ok(Json(
         build_queue_response(&state, session_id, &actor).await?,
@@ -1276,15 +1297,14 @@ async fn remove_queue_track(
     db::party::remove_queue_item(&state.pool, session_id, body.item_id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    db::party::refill_queue_from_source(&state.pool, session_id)
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
     if session.mode == db::party::PartyMode::VotedQueue.as_str() {
         db::party::sort_voted_queue(&state.pool, session_id)
             .await
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
+    db::party::refill_queue_from_source(&state.pool, session_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     Ok(Json(
         build_queue_response(&state, session_id, &actor).await?,
@@ -1328,6 +1348,9 @@ async fn vote_queue_item(
     db::party::sort_voted_queue(&state.pool, session_id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    db::party::refill_queue_from_source(&state.pool, session_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     Ok(Json(
         build_queue_response(&state, session_id, &actor).await?,
@@ -1357,6 +1380,9 @@ async fn unvote_queue_item(
     db::party::sort_voted_queue(&state.pool, session_id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    db::party::refill_queue_from_source(&state.pool, session_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     Ok(Json(
         build_queue_response(&state, session_id, &actor).await?,
@@ -1378,6 +1404,9 @@ async fn unpin_queue_item(
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     db::party::sort_voted_queue(&state.pool, session_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    db::party::refill_queue_from_source(&state.pool, session_id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
@@ -1629,6 +1658,7 @@ async fn build_queue_response(
                 voters,
                 added_by_user_id: item.added_by_user_id,
                 added_by_guest_id: item.added_by_guest_id,
+                from_source_queue: item.from_source_queue,
                 queue_owner_key: queue_owner_key(&item),
                 queue_owner_name: queue_owner_name(&item),
                 added_by_display_name: item.added_by_display_name,
@@ -1640,6 +1670,10 @@ async fn build_queue_response(
 }
 
 fn queue_owner_key(item: &db::party::PartyQueueItem) -> String {
+    if item.from_source_queue {
+        return "source".to_string();
+    }
+
     queue_owner_key_parts(item.added_by_user_id, item.added_by_guest_id)
         .unwrap_or_else(|| "unknown".to_string())
 }
@@ -1656,6 +1690,10 @@ fn queue_owner_key_parts(
 }
 
 fn queue_owner_name(item: &db::party::PartyQueueItem) -> String {
+    if item.from_source_queue {
+        return "Source".to_string();
+    }
+
     item.added_by_display_name
         .clone()
         .unwrap_or_else(|| "Unknown".to_string())
@@ -2113,6 +2151,7 @@ fn session_response(
         mode: session.mode,
         allow_guest_playlist_adds: session.allow_guest_playlist_adds,
         source_min_queue_size: session.source_min_queue_size,
+        source_insert_interval: session.source_insert_interval,
         add_added_tracks_to_source: session.add_added_tracks_to_source,
         show_queue_attribution: session.show_queue_attribution,
         current_track_uri: session.current_track_uri,

@@ -11,6 +11,7 @@ export interface PartySession {
   mode: PartyMode
   allow_guest_playlist_adds: boolean
   source_min_queue_size: number
+  source_insert_interval: number
   add_added_tracks_to_source: boolean
   show_queue_attribution: boolean
   current_track_uri: string | null
@@ -42,6 +43,7 @@ export interface PartyQueueItem {
   voters: PartyVoter[]
   added_by_user_id: string | null
   added_by_guest_id: string | null
+  from_source_queue: boolean
   added_by_display_name: string | null
   queue_owner_key: string
   queue_owner_name: string
@@ -113,6 +115,7 @@ export const getActivePartySession = () =>
 export interface CreatePartySessionOptions {
   source_playlist_id?: string
   source_min_queue_size?: number
+  source_insert_interval?: number
   add_added_tracks_to_source?: boolean
 }
 
@@ -150,6 +153,7 @@ export const updatePartyMode = (id: string, mode: PartyMode) =>
 export interface UpdatePartySettingsOptions {
   allow_guest_playlist_adds?: boolean
   source_min_queue_size?: number
+  source_insert_interval?: number
   add_added_tracks_to_source?: boolean
   show_queue_attribution?: boolean
 }
