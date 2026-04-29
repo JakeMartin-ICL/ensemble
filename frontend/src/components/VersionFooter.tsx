@@ -17,6 +17,20 @@ function sameVersion(latest: VersionInfo | null) {
   return !latest || latest.commitSha === buildInfo.commitSha
 }
 
+async function forceRefresh() {
+  const registrations = await navigator.serviceWorker.getRegistrations()
+  await Promise.all(registrations.map((registration) => registration.unregister()))
+
+  if ('caches' in window) {
+    const cacheNames = await caches.keys()
+    await Promise.all(cacheNames.map((cacheName) => caches.delete(cacheName)))
+  }
+
+  const url = new URL(window.location.href)
+  url.searchParams.set('refresh', Date.now().toString())
+  window.location.replace(url.toString())
+}
+
 export default function VersionFooter() {
   const [latest, setLatest] = useState<VersionInfo | null>(null)
 
@@ -49,10 +63,22 @@ export default function VersionFooter() {
 
   return (
     <footer className="versionFooter" aria-label="App version">
-      <span>v {buildInfo.shortSha}</span>
+      <button
+        className="versionFooterVersion"
+        type="button"
+        title="Force refresh app"
+        onClick={() => {
+          void forceRefresh().catch((error: unknown) => {
+            console.warn('Unable to force refresh app', error)
+            window.location.reload()
+          })
+        }}
+      >
+        v {buildInfo.shortSha}
+      </button>
       <span>{builtAt}</span>
       {updateAvailable && (
-        <button className="versionFooterUpdate" type="button" onClick={() => { window.location.reload() }}>
+        <button className="versionFooterUpdate" type="button" onClick={() => { void forceRefresh() }}>
           Update available
         </button>
       )}

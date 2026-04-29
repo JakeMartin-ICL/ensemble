@@ -17,6 +17,19 @@
   backdrop-filter: blur(10px);
 }
 
+.versionFooterVersion {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.versionFooterVersion:hover {
+  color: var(--text);
+}
+
 .versionFooterUpdate {
   padding: 2px 6px;
   border: 1px solid var(--accent-border);
