@@ -76,6 +76,7 @@ export default function PartySessionPage() {
   const [error, setError] = useState<string | null>(null)
   const [confirmingEnd, setConfirmingEnd] = useState(false)
   const [exportDialogOpen, setExportDialogOpen] = useState(false)
+  const [partyQueueTab, setPartyQueueTab] = useState('up_next')
   const [duplicatePulse, setDuplicatePulse] = useState<{ itemId: string; token: number } | null>(null)
   const duplicatePulseTokenRef = useRef(0)
   const pendingRemovedIdsRef = useRef<Set<string>>(new Set())
@@ -342,8 +343,9 @@ export default function PartySessionPage() {
 
   function handleReorder(item: PartyQueueItem, toPosition: number) {
     if (!session || !canEditQueue(session)) return
-    if (toPosition < 0 || toPosition >= queue.items.length) return
-    setQueue(applyMove(queue, item.id, toPosition))
+    const editableItems = editableQueueItems(session, queue.items, partyQueueTab)
+    if (toPosition < 0 || toPosition >= editableItems.length) return
+    setQueue(applyMove(queue, item.id, toPosition, editableItems))
     void reorderPartyQueue(session.id, item.id, toPosition)
       .then((q) => { setQueue(filterPendingRemoved(q, pendingRemovedIdsRef.current)) })
       .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
@@ -715,6 +717,8 @@ export default function PartySessionPage() {
         showAttribution={session.show_queue_attribution}
         canEditQueue={canEditQueue(session)}
         canAddPlaylists={canAddPlaylists(session)}
+        activeTab={partyQueueTab}
+        onTabChange={setPartyQueueTab}
         duplicatePulse={duplicatePulse}
         libraryTracks={libraryTracks}
         libraryPlaylists={libraryPlaylists}
@@ -867,6 +871,8 @@ function PartyQueuePanel({
   showAttribution,
   canEditQueue,
   canAddPlaylists,
+  activeTab,
+  onTabChange,
   duplicatePulse,
   libraryTracks,
   libraryPlaylists,
@@ -886,6 +892,8 @@ function PartyQueuePanel({
   showAttribution: boolean
   canEditQueue: boolean
   canAddPlaylists: boolean
+  activeTab: string
+  onTabChange: (tab: string) => void
   duplicatePulse: { itemId: string; token: number } | null
   libraryTracks: TrackSearchResult[]
   libraryPlaylists: PartyPlaylistSearchResult[]
@@ -1048,6 +1056,10 @@ function PartyQueuePanel({
     playlists: [],
   }))
   const searchOpen = query.trim().length >= 2
+  const balancedTabs = session.mode === 'balanced_queue' ? balancedQueueTabs(queue.items, session) : []
+  const visibleItems = visibleQueueItems(session, queue.items, activeTab)
+  const canEditVisibleQueue = canEditQueue
+    && (session.mode !== 'balanced_queue' || session.is_host || activeTab === ownQueueKey(session))
 
   useLayoutEffect(() => {
     if (!searchOpen) {
@@ -1207,22 +1219,39 @@ function PartyQueuePanel({
       </div>
 
       <div className={styles.queueTabs}>
-        <button className={styles.queueTab} type="button">Up next</button>
+        <button
+          className={`${styles.queueTab} ${activeTab === 'up_next' ? styles.queueTabActive : ''}`}
+          onClick={() => { onTabChange('up_next') }}
+          type="button"
+        >
+          Up next
+        </button>
+        {balancedTabs.map((tab) => (
+          <button
+            key={tab.key}
+            className={`${styles.queueTab} ${activeTab === tab.key ? styles.queueTabActive : ''}`}
+            onClick={() => { onTabChange(tab.key) }}
+            style={{ borderColor: ownerColor(tab.key) }}
+            type="button"
+          >
+            {tab.label}
+          </button>
+        ))}
       </div>
 
-      {queue.items.length === 0 ? (
+      {visibleItems.length === 0 ? (
         <p className={styles.queueEmpty}>Nothing queued</p>
       ) : (
         <QueueList
-          items={queue.items}
+          items={visibleItems}
           getKey={(item) => item.id}
-          getColor={(item) => item.pin_position != null && session.mode === 'voted_queue' ? '#a78bfa' : '#1db954'}
-          canReorder={canEditQueue}
+          getColor={(item) => item.pin_position != null && session.mode === 'voted_queue' ? '#a78bfa' : ownerColor(item.queue_owner_key)}
+          canReorder={canEditVisibleQueue}
           pulseKey={duplicatePulse?.itemId}
           pulseToken={duplicatePulse?.token}
           onReorder={onReorder}
-          onTopDrop={canEditQueue ? (item) => { onReorder(item, 0) } : undefined}
-          onRemoveDrop={canEditQueue ? onRemove : undefined}
+          onTopDrop={canEditVisibleQueue ? (item) => { onReorder(item, 0) } : undefined}
+          onRemoveDrop={canEditVisibleQueue ? onRemove : undefined}
           removeDropLabel="Remove"
           renderActions={(item) => (
             <span className={styles.queueItemActions}>
@@ -1490,6 +1519,19 @@ function PartyModePanel({
         <span>
           <span className={styles.partyModeTitle}>Votes</span>
           <span className={styles.partyModeMeta}>Guests upvote songs. Queue sorts by popularity.</span>
+        </span>
+      </button>
+      <button
+        className={`${styles.partyModeOption}${mode === 'balanced_queue' ? ` ${styles.partyModeOptionActive}` : ''}`}
+        onClick={() => { onModeChange('balanced_queue') }}
+        disabled={savingMode !== null}
+        type="button"
+        aria-pressed={mode === 'balanced_queue'}
+      >
+        <span className={styles.partyModeIcon}><ShuffleIcon /></span>
+        <span>
+          <span className={styles.partyModeTitle}>Balanced</span>
+          <span className={styles.partyModeMeta}>Round robin across guest queues.</span>
         </span>
       </button>
     </div>
@@ -1969,6 +2011,14 @@ function PlaylistIcon() {
   )
 }
 
+function ShuffleIcon() {
+  return (
+    <IconSvg>
+      <path d="M17 3h4v4h-2V6.4l-3.3 3.3-1.4-1.4L17.6 5H17V3ZM4 7h2.2c1.6 0 2.8.65 3.8 1.75l1.35 1.5-1.35 1.5C9 12.85 7.8 13.5 6.2 13.5H4v-2h2.2c.95 0 1.55-.35 2.3-1.15l.1-.1-.1-.1C7.75 9.35 7.15 9 6.2 9H4V7Zm11.7 7.3L19 17.6V17h2v4h-4v-2h.6l-3.3-3.3 1.4-1.4ZM13 12.25l2.7 3-1.4 1.4-5.8-6.5C7.75 9.35 7.15 9 6.2 9H4V7h2.2c1.6 0 2.8.65 3.8 1.75l1.65 1.85L13 12.25Z" />
+    </IconSvg>
+  )
+}
+
 function PersonIcon() {
   return (
     <IconSvg>
@@ -1985,13 +2035,78 @@ function CloseIcon() {
   )
 }
 
-function applyMove(queue: PartyQueueState, itemId: string, toPosition: number): PartyQueueState {
-  const items = [...queue.items]
-  const fromPosition = items.findIndex((item) => item.id === itemId)
+function applyMove(
+  queue: PartyQueueState,
+  itemId: string,
+  toPosition: number,
+  scopeItems = queue.items,
+): PartyQueueState {
+  const scopeIds = new Set(scopeItems.map((item) => item.id))
+  const scopedItems = queue.items.filter((item) => scopeIds.has(item.id))
+  const fromPosition = scopedItems.findIndex((item) => item.id === itemId)
   if (fromPosition === -1) return queue
-  const [item] = items.splice(fromPosition, 1)
-  items.splice(toPosition, 0, item)
+  const [item] = scopedItems.splice(fromPosition, 1)
+  scopedItems.splice(toPosition, 0, item)
+  let scopedIndex = 0
+  const items = queue.items.map((candidate) => {
+    if (!scopeIds.has(candidate.id)) return candidate
+    const moved = scopedItems[scopedIndex]
+    scopedIndex += 1
+    return moved
+  })
   return { items: items.map((candidate, position) => ({ ...candidate, position })) }
+}
+
+function balancedQueueTabs(items: PartyQueueItem[], session: PartySession): { key: string; label: string }[] {
+  const tabs = new Map<string, string>()
+  const ownKey = ownQueueKey(session)
+  tabs.set(ownKey, session.is_host ? 'Host' : 'Mine')
+
+  for (const item of items) {
+    if (item.queue_owner_key === 'unknown') continue
+    if (item.queue_owner_key === ownKey) {
+      tabs.set(item.queue_owner_key, session.is_host ? 'Host' : 'Mine')
+    } else if (items.some((candidate) => candidate.queue_owner_key === item.queue_owner_key)) {
+      tabs.set(item.queue_owner_key, item.queue_owner_name)
+    }
+  }
+
+  return Array.from(tabs, ([key, label]) => ({ key, label }))
+}
+
+function visibleQueueItems(
+  session: PartySession,
+  items: PartyQueueItem[],
+  activeTab: string,
+): PartyQueueItem[] {
+  const visible = session.mode === 'balanced_queue' && activeTab !== 'up_next'
+    ? items.filter((item) => item.queue_owner_key === activeTab)
+    : items
+  return visible.map((item, position) => ({ ...item, position }))
+}
+
+function editableQueueItems(
+  session: PartySession,
+  items: PartyQueueItem[],
+  activeTab: string,
+): PartyQueueItem[] {
+  if (session.mode !== 'balanced_queue' || session.is_host) {
+    return visibleQueueItems(session, items, activeTab)
+  }
+  return visibleQueueItems(session, items, ownQueueKey(session))
+}
+
+function ownQueueKey(session: PartySession): string {
+  return session.is_guest ? `guest:${session.actor_id}` : `user:${session.actor_id}`
+}
+
+function ownerColor(ownerKey: string): string {
+  const palette = ['#1db954', '#f59e0b', '#38bdf8', '#f472b6', '#a3e635', '#fb7185', '#2dd4bf', '#c084fc']
+  let hash = 0
+  for (const char of ownerKey) {
+    hash = ((hash * 31) + char.charCodeAt(0)) >>> 0
+  }
+  return palette[hash % palette.length]
 }
 
 function filterPendingRemoved(queue: PartyQueueState, pendingIds: Set<string>): PartyQueueState {
@@ -2081,7 +2196,7 @@ function initials(name: string): string {
 }
 
 function canEditQueue(session: PartySession): boolean {
-  return session.is_host || session.mode === 'shared_queue'
+  return session.is_host || session.mode === 'shared_queue' || session.mode === 'balanced_queue'
 }
 
 function canAddPlaylists(session: PartySession): boolean {
@@ -2091,6 +2206,7 @@ function canAddPlaylists(session: PartySession): boolean {
 function modeLabel(mode: PartyMode): string {
   if (mode === 'shared_queue') return 'Shared queue'
   if (mode === 'voted_queue') return 'Votes'
+  if (mode === 'balanced_queue') return 'Balanced'
   return 'Add only'
 }
 

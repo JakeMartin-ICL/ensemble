@@ -116,6 +116,7 @@ pub enum PartyMode {
     OpenQueue,
     SharedQueue,
     VotedQueue,
+    BalancedQueue,
 }
 
 impl PartyMode {
@@ -124,6 +125,7 @@ impl PartyMode {
             Self::OpenQueue => "open_queue",
             Self::SharedQueue => "shared_queue",
             Self::VotedQueue => "voted_queue",
+            Self::BalancedQueue => "balanced_queue",
         }
     }
 }
@@ -136,6 +138,7 @@ impl std::str::FromStr for PartyMode {
             "open_queue" => Ok(Self::OpenQueue),
             "shared_queue" => Ok(Self::SharedQueue),
             "voted_queue" => Ok(Self::VotedQueue),
+            "balanced_queue" => Ok(Self::BalancedQueue),
             _ => Err(anyhow::anyhow!("unsupported party mode")),
         }
     }
@@ -173,7 +176,7 @@ pub async fn get_active_session(
         r#"
         SELECT id, host_user_id, room_code, mode, allow_guest_playlist_adds,
                source_min_queue_size, add_added_tracks_to_source, show_queue_attribution,
-               current_track_uri, queued_track_uri, is_active, created_at, updated_at,
+                  current_track_uri, queued_track_uri, is_active, created_at, updated_at,
                playback_track_uri, playback_progress_ms, playback_duration_ms,
                playback_is_playing, playback_updated_at
         FROM public.party_sessions
@@ -194,7 +197,7 @@ pub async fn get_session(pool: &PgPool, session_id: Uuid) -> anyhow::Result<Opti
         r#"
         SELECT id, host_user_id, room_code, mode, allow_guest_playlist_adds,
                source_min_queue_size, add_added_tracks_to_source, show_queue_attribution,
-               current_track_uri, queued_track_uri, is_active, created_at, updated_at,
+                  current_track_uri, queued_track_uri, is_active, created_at, updated_at,
                playback_track_uri, playback_progress_ms, playback_duration_ms,
                playback_is_playing, playback_updated_at
         FROM public.party_sessions
@@ -216,7 +219,7 @@ pub async fn get_session_by_room_code(
         r#"
         SELECT id, host_user_id, room_code, mode, allow_guest_playlist_adds,
                source_min_queue_size, add_added_tracks_to_source, show_queue_attribution,
-               current_track_uri, queued_track_uri, is_active, created_at, updated_at,
+                  current_track_uri, queued_track_uri, is_active, created_at, updated_at,
                playback_track_uri, playback_progress_ms, playback_duration_ms,
                playback_is_playing, playback_updated_at
         FROM public.party_sessions
@@ -538,6 +541,14 @@ pub async fn queue_items(pool: &PgPool, session_id: Uuid) -> anyhow::Result<Vec<
     Ok(items)
 }
 
+pub async fn balanced_queue_items(
+    pool: &PgPool,
+    session_id: Uuid,
+) -> anyhow::Result<Vec<PartyQueueItem>> {
+    let items = queue_items(pool, session_id).await?;
+    Ok(balanced_order_queue_items(items))
+}
+
 pub async fn first_queue_item(
     pool: &PgPool,
     session_id: Uuid,
@@ -559,6 +570,16 @@ pub async fn first_queue_item(
     .await
     .context("fetching first party queue item")?;
     Ok(item)
+}
+
+pub async fn first_balanced_queue_item(
+    pool: &PgPool,
+    session_id: Uuid,
+) -> anyhow::Result<Option<PartyQueueItem>> {
+    Ok(balanced_queue_items(pool, session_id)
+        .await?
+        .into_iter()
+        .next())
 }
 
 pub async fn next_position(pool: &PgPool, session_id: Uuid) -> anyhow::Result<i32> {
@@ -845,6 +866,15 @@ pub async fn update_queue_positions(
         .map(|(position, _)| i32::try_from(position).context("queue position overflow"))
         .collect::<anyhow::Result<Vec<_>>>()?;
 
+    update_queue_positions_to(pool, session_id, item_ids, &positions).await
+}
+
+pub async fn update_queue_positions_to(
+    pool: &PgPool,
+    session_id: Uuid,
+    item_ids: &[Uuid],
+    positions: &[i32],
+) -> anyhow::Result<()> {
     sqlx::query(
         r#"
         UPDATE public.party_queue_items q
@@ -854,7 +884,7 @@ pub async fn update_queue_positions(
         "#,
     )
     .bind(item_ids)
-    .bind(&positions)
+    .bind(positions)
     .bind(session_id)
     .execute(pool)
     .await
@@ -919,6 +949,35 @@ pub async fn pop_next_queue_item(
     .context("popping next party queue item")?;
 
     decrement_pins_after_position(pool, session_id, -1).await?;
+    compact_queue_positions(pool, session_id).await?;
+
+    Ok(item)
+}
+
+pub async fn pop_next_balanced_queue_item(
+    pool: &PgPool,
+    session_id: Uuid,
+) -> anyhow::Result<Option<PartyQueueItem>> {
+    let Some(next) = first_balanced_queue_item(pool, session_id).await? else {
+        return Ok(None);
+    };
+
+    let item = sqlx::query_as::<_, PartyQueueItem>(
+        r#"
+        DELETE FROM public.party_queue_items
+        WHERE id = $1 AND session_id = $2
+        RETURNING id, session_id, position, NULL::integer AS pin_position, track, added_by_user_id, added_by_guest_id,
+                  NULL::text AS added_by_display_name, created_at
+        "#,
+    )
+    .bind(next.id)
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await
+    .context("popping next balanced party queue item")?;
+
+    let removed_position = item.as_ref().map(|i| i.position).unwrap_or(0);
+    decrement_pins_after_position(pool, session_id, removed_position - 1).await?;
     compact_queue_positions(pool, session_id).await?;
 
     Ok(item)
@@ -1363,4 +1422,63 @@ pub async fn update_playback_state(
     .await
     .context("updating party playback state")?;
     Ok(())
+}
+
+fn balanced_order_queue_items(items: Vec<PartyQueueItem>) -> Vec<PartyQueueItem> {
+    let mut groups: Vec<(String, Vec<PartyQueueItem>)> = Vec::new();
+
+    for item in items {
+        let key = queue_owner_key(&item);
+        if let Some((_, group)) = groups.iter_mut().find(|(group_key, _)| group_key == &key) {
+            group.push(item);
+        } else {
+            groups.push((key, vec![item]));
+        }
+    }
+
+    for (_, group) in &mut groups {
+        group.sort_by(|a, b| {
+            a.position
+                .cmp(&b.position)
+                .then_with(|| a.created_at.cmp(&b.created_at))
+        });
+    }
+
+    groups.sort_by(|(_, a), (_, b)| {
+        let a_first = a.first();
+        let b_first = b.first();
+        match (a_first, b_first) {
+            (Some(a), Some(b)) => a
+                .position
+                .cmp(&b.position)
+                .then_with(|| a.created_at.cmp(&b.created_at)),
+            _ => std::cmp::Ordering::Equal,
+        }
+    });
+
+    let mut ordered = Vec::new();
+    loop {
+        let mut added = false;
+        for (_, group) in &mut groups {
+            if !group.is_empty() {
+                ordered.push(group.remove(0));
+                added = true;
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+
+    ordered
+}
+
+fn queue_owner_key(item: &PartyQueueItem) -> String {
+    if let Some(id) = item.added_by_user_id {
+        format!("user:{id}")
+    } else if let Some(id) = item.added_by_guest_id {
+        format!("guest:{id}")
+    } else {
+        "unknown".to_string()
+    }
 }

@@ -119,6 +119,10 @@ impl HeartbeatDriver for PartyHeartbeat {
             db::party::refill_queue_from_source(&self.pool, self.session_id).await?;
             if session.mode == db::party::PartyMode::VotedQueue.as_str() {
                 db::party::sort_voted_queue(&self.pool, self.session_id).await?;
+            } else if session.mode == db::party::PartyMode::BalancedQueue.as_str() {
+                let items = db::party::balanced_queue_items(&self.pool, self.session_id).await?;
+                let ids = items.iter().map(|item| item.id).collect::<Vec<_>>();
+                db::party::update_queue_positions(&self.pool, self.session_id, &ids).await?;
             }
             Ok(())
         })
@@ -133,9 +137,12 @@ impl HeartbeatDriver for PartyHeartbeat {
             if session.mode == db::party::PartyMode::VotedQueue.as_str() {
                 db::party::sort_voted_queue(&self.pool, self.session_id).await?;
             }
-            Ok(db::party::first_queue_item(&self.pool, self.session_id)
-                .await?
-                .map(|item| item.track.uri.clone()))
+            let item = if session.mode == db::party::PartyMode::BalancedQueue.as_str() {
+                db::party::first_balanced_queue_item(&self.pool, self.session_id).await?
+            } else {
+                db::party::first_queue_item(&self.pool, self.session_id).await?
+            };
+            Ok(item.map(|item| item.track.uri.clone()))
         })
     }
 

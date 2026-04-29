@@ -118,6 +118,7 @@ struct SessionResponse {
     current_track_uri: Option<String>,
     is_host: bool,
     is_guest: bool,
+    actor_id: Uuid,
     display_name: Option<String>,
     session_token: Option<String>,
 }
@@ -198,7 +199,10 @@ struct QueueItemResponse {
     user_voted: bool,
     voters: Vec<VoterResponse>,
     added_by_user_id: Option<Uuid>,
+    added_by_guest_id: Option<Uuid>,
     added_by_display_name: Option<String>,
+    queue_owner_key: String,
+    queue_owner_name: String,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -753,10 +757,13 @@ async fn skip_to_next(
     db::party::refill_queue_from_source(&state.pool, session_id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let item = db::party::pop_next_queue_item(&state.pool, session_id)
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
-        .ok_or_else(|| err(StatusCode::UNPROCESSABLE_ENTITY, "queue is empty"))?;
+    let item = if session.mode == db::party::PartyMode::BalancedQueue.as_str() {
+        db::party::pop_next_balanced_queue_item(&state.pool, session_id).await
+    } else {
+        db::party::pop_next_queue_item(&state.pool, session_id).await
+    }
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
+    .ok_or_else(|| err(StatusCode::UNPROCESSABLE_ENTITY, "queue is empty"))?;
 
     spotify::player::start_track(&access_token, &item.track.uri)
         .await
@@ -829,6 +836,14 @@ async fn update_mode(
         db::party::sort_voted_queue(&state.pool, session_id)
             .await
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    } else if mode == db::party::PartyMode::BalancedQueue {
+        let items = db::party::balanced_queue_items(&state.pool, session_id)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        let ids = items.iter().map(|item| item.id).collect::<Vec<_>>();
+        db::party::update_queue_positions(&state.pool, session_id, &ids)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     } else if current.mode == db::party::PartyMode::VotedQueue.as_str() {
         db::party::clear_all_pins(&state.pool, session_id)
             .await
@@ -882,7 +897,6 @@ async fn update_settings(
             .await
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
-
     let updated = get_existing_session(&state, session_id).await?;
     Ok(Json(session_response(updated, &actor, None)))
 }
@@ -1119,6 +1133,53 @@ async fn reorder_queue(
         db::party::sort_voted_queue(&state.pool, session_id)
             .await
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    } else if session.mode == db::party::PartyMode::BalancedQueue.as_str()
+        && actor.user_id() != Some(session.host_user_id)
+    {
+        let items = db::party::queue_items(&state.pool, session_id)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        let Some(item) = items.iter().find(|item| item.id == body.item_id) else {
+            return Err(err(StatusCode::NOT_FOUND, "queue item not found"));
+        };
+        if !actor_owns_item(&actor, item) {
+            return Err(err(StatusCode::FORBIDDEN, "your queue only"));
+        }
+        let mut ids = items
+            .iter()
+            .filter(|item| actor_owns_item(&actor, item))
+            .map(|item| item.id)
+            .collect::<Vec<_>>();
+        let positions = items
+            .iter()
+            .filter(|item| actor_owns_item(&actor, item))
+            .map(|item| item.position)
+            .collect::<Vec<_>>();
+        let Some(from_position) = ids.iter().position(|id| *id == body.item_id) else {
+            return Err(err(StatusCode::NOT_FOUND, "queue item not found"));
+        };
+        let item_id = ids.remove(from_position);
+        let to_position = body.to_position.min(ids.len());
+        ids.insert(to_position, item_id);
+
+        db::party::update_queue_positions_to(&state.pool, session_id, &ids, &positions)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    } else if session.mode == db::party::PartyMode::BalancedQueue.as_str() {
+        let items = db::party::balanced_queue_items(&state.pool, session_id)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        let mut ids = items.iter().map(|item| item.id).collect::<Vec<_>>();
+        let Some(from_position) = ids.iter().position(|id| *id == body.item_id) else {
+            return Err(err(StatusCode::NOT_FOUND, "queue item not found"));
+        };
+        let item_id = ids.remove(from_position);
+        let to_position = body.to_position.min(ids.len());
+        ids.insert(to_position, item_id);
+
+        db::party::update_queue_positions(&state.pool, session_id, &ids)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     } else {
         let items = db::party::queue_items(&state.pool, session_id)
             .await
@@ -1149,6 +1210,19 @@ async fn remove_queue_track(
 ) -> ApiResult<QueueResponse> {
     let actor = actor_from_headers(&state, &headers).await?;
     let session = get_queue_editor_session(&state, session_id, &actor).await?;
+    if session.mode == db::party::PartyMode::BalancedQueue.as_str()
+        && actor.user_id() != Some(session.host_user_id)
+    {
+        let items = db::party::queue_items(&state.pool, session_id)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        let Some(item) = items.iter().find(|item| item.id == body.item_id) else {
+            return Err(err(StatusCode::NOT_FOUND, "queue item not found"));
+        };
+        if !actor_owns_item(&actor, item) {
+            return Err(err(StatusCode::FORBIDDEN, "your queue only"));
+        }
+    }
 
     db::party::remove_queue_item(&state.pool, session_id, body.item_id)
         .await
@@ -1449,9 +1523,13 @@ async fn build_queue_response(
     session_id: Uuid,
     actor: &PartyActor,
 ) -> Result<QueueResponse, (StatusCode, Json<Value>)> {
-    let items = db::party::queue_items(&state.pool, session_id)
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let session = get_existing_session(state, session_id).await?;
+    let items = if session.mode == db::party::PartyMode::BalancedQueue.as_str() {
+        db::party::balanced_queue_items(&state.pool, session_id).await
+    } else {
+        db::party::queue_items(&state.pool, session_id).await
+    }
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let raw_votes = db::party::votes_for_queue_items(&state.pool, session_id)
         .await
@@ -1493,12 +1571,31 @@ async fn build_queue_response(
                 user_voted,
                 voters,
                 added_by_user_id: item.added_by_user_id,
+                added_by_guest_id: item.added_by_guest_id,
+                queue_owner_key: queue_owner_key(&item),
+                queue_owner_name: queue_owner_name(&item),
                 added_by_display_name: item.added_by_display_name,
             }
         })
         .collect();
 
     Ok(QueueResponse { items })
+}
+
+fn queue_owner_key(item: &db::party::PartyQueueItem) -> String {
+    if let Some(id) = item.added_by_user_id {
+        format!("user:{id}")
+    } else if let Some(id) = item.added_by_guest_id {
+        format!("guest:{id}")
+    } else {
+        "unknown".to_string()
+    }
+}
+
+fn queue_owner_name(item: &db::party::PartyQueueItem) -> String {
+    item.added_by_display_name
+        .clone()
+        .unwrap_or_else(|| "Unknown".to_string())
 }
 
 async fn build_source_queue_response(
@@ -1905,6 +2002,7 @@ async fn get_queue_editor_session(
     }
     if actor.user_id() == Some(session.host_user_id)
         || session.mode == db::party::PartyMode::SharedQueue.as_str()
+        || session.mode == db::party::PartyMode::BalancedQueue.as_str()
     {
         return Ok(session);
     }
@@ -1943,8 +2041,16 @@ fn session_response(
         current_track_uri: session.current_track_uri,
         is_host,
         is_guest: actor.is_guest(),
+        actor_id: actor.id(),
         display_name: Some(actor.display_name().to_string()),
         session_token,
+    }
+}
+
+fn actor_owns_item(actor: &PartyActor, item: &db::party::PartyQueueItem) -> bool {
+    match actor {
+        PartyActor::User { id, .. } => item.added_by_user_id == Some(*id),
+        PartyActor::Guest { id, .. } => item.added_by_guest_id == Some(*id),
     }
 }
 

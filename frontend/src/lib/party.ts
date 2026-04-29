@@ -16,11 +16,12 @@ export interface PartySession {
   current_track_uri: string | null
   is_host: boolean
   is_guest: boolean
+  actor_id: string
   display_name: string | null
   session_token: string | null
 }
 
-export type PartyMode = 'open_queue' | 'shared_queue' | 'voted_queue'
+export type PartyMode = 'open_queue' | 'shared_queue' | 'voted_queue' | 'balanced_queue'
 
 export interface PartyVoter {
   user_id: string
@@ -40,7 +41,10 @@ export interface PartyQueueItem {
   user_voted: boolean
   voters: PartyVoter[]
   added_by_user_id: string | null
+  added_by_guest_id: string | null
   added_by_display_name: string | null
+  queue_owner_key: string
+  queue_owner_name: string
 }
 
 export interface PartyQueueState {
