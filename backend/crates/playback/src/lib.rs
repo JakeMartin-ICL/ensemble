@@ -73,7 +73,7 @@ where
         // Default to slow polling; updated at end of iteration if we have playback state.
         sleep_ms = 10_000;
 
-        let session = match driver.load_session().await? {
+        let mut session = match driver.load_session().await? {
             Some(s) if driver.is_active(&s) => s,
             _ => {
                 info!("{label} heartbeat: session {session_id} no longer active, stopping");
@@ -116,15 +116,15 @@ where
                 warn!("{label} heartbeat: failed to handle track change: {e:#}");
             }
             queued_for = None;
-        }
 
-        let session = match driver.load_session().await? {
-            Some(s) if driver.is_active(&s) => s,
-            _ => {
-                info!("{label} heartbeat: session {session_id} no longer active, stopping");
-                return Ok(());
-            }
-        };
+            session = match driver.load_session().await? {
+                Some(s) if driver.is_active(&s) => s,
+                _ => {
+                    info!("{label} heartbeat: session {session_id} no longer active, stopping");
+                    return Ok(());
+                }
+            };
+        }
 
         if playback.duration_ms == 0 {
             continue;

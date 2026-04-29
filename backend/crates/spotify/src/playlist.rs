@@ -10,6 +10,7 @@ macro_rules! log_call {
     };
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PlaylistSummary {
     pub id: String,
     pub name: String,
@@ -17,6 +18,14 @@ pub struct PlaylistSummary {
     pub image_url: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PlaylistMetadata {
+    pub name: String,
+    pub snapshot_id: Option<String>,
+    pub track_count: u32,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PlaylistTrack {
     pub uri: String,
     pub name: String,
@@ -267,6 +276,13 @@ struct RawPlaylist {
 }
 
 #[derive(serde::Deserialize)]
+struct RawPlaylistMetadata {
+    name: String,
+    items: RawCollectionMeta,
+    snapshot_id: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
 struct RawCollectionMeta {
     total: u32,
 }
@@ -333,6 +349,36 @@ pub async fn get_user_playlists(access_token: &str) -> anyhow::Result<Vec<Playli
     }
 
     Ok(playlists)
+}
+
+pub async fn get_playlist_metadata(
+    access_token: &str,
+    playlist_id: &str,
+) -> anyhow::Result<PlaylistMetadata> {
+    let url = format!("https://api.spotify.com/v1/playlists/{playlist_id}");
+    log_call!("GET", &url);
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .bearer_auth(access_token)
+        .query(&[("fields", "name,snapshot_id,items(total)")])
+        .send()
+        .await
+        .context("fetching Spotify playlist metadata")?;
+
+    if !resp.status().is_success() {
+        return Err(crate::spotify_error("playlist metadata", resp).await);
+    }
+
+    let raw = resp
+        .json::<RawPlaylistMetadata>()
+        .await
+        .context("parsing Spotify playlist metadata response")?;
+
+    Ok(PlaylistMetadata {
+        name: raw.name,
+        snapshot_id: raw.snapshot_id,
+        track_count: raw.items.total,
+    })
 }
 
 #[derive(serde::Deserialize)]

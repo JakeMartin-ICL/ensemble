@@ -1,4 +1,5 @@
 mod routes;
+mod spotify_cache;
 
 use anyhow::Context;
 use axum::{

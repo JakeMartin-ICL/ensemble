@@ -1037,18 +1037,20 @@ async fn add_queue_playlist(
     }
 
     let access_token = get_access_token(&state, user_id).await?;
-    let tracks = spotify::playlist::get_tracks(&access_token, &body.playlist_id)
-        .await
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?
-        .into_iter()
-        .map(|track| db::party::PartyTrack {
-            uri: track.uri,
-            name: Some(track.name),
-            artist: Some(track.artist),
-            album_art_url: track.album_art_url,
-            duration_ms: Some(track.duration_ms),
-        })
-        .collect::<Vec<_>>();
+    let tracks =
+        crate::spotify_cache::playlist_tracks(&state.pool, &access_token, &body.playlist_id)
+            .await
+            .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?
+            .tracks
+            .into_iter()
+            .map(|track| db::party::PartyTrack {
+                uri: track.uri,
+                name: Some(track.name),
+                artist: Some(track.artist),
+                album_art_url: track.album_art_url,
+                duration_ms: Some(track.duration_ms),
+            })
+            .collect::<Vec<_>>();
 
     if tracks.is_empty() {
         return Err(err(
@@ -1385,13 +1387,13 @@ async fn get_library_tracks(
         .expect("user actor should have user id");
     let access_token = get_access_token(&state, user_id).await?;
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
-    let playlists = user_playlists(&access_token)
+    let playlists = user_playlists(&state, user_id, &access_token)
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
     let results = if limit == 0 {
         Vec::new()
     } else {
-        user_playlist_tracks(&access_token, &playlists, limit).await
+        user_playlist_tracks(&state, &access_token, &playlists, limit).await
     };
 
     Ok(Json(TrackSearchResponse { results, playlists }))
@@ -1717,9 +1719,10 @@ async fn seed_source_playlist(
     playlist_id: &str,
 ) -> Result<(), (StatusCode, Json<Value>)> {
     let access_token = get_access_token(state, user_id).await?;
-    let mut tracks = spotify::playlist::get_tracks(&access_token, playlist_id)
+    let mut tracks = crate::spotify_cache::playlist_tracks(&state.pool, &access_token, playlist_id)
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?
+        .tracks
         .into_iter()
         .map(|track| db::party::PartyTrack {
             uri: track.uri,
@@ -1805,20 +1808,27 @@ async fn search_party_cached_tracks(
     Ok(results)
 }
 
-async fn user_playlists(access_token: &str) -> anyhow::Result<Vec<PlaylistSearchResultResponse>> {
-    Ok(spotify::playlist::get_user_playlists(access_token)
-        .await?
-        .into_iter()
-        .map(|playlist| PlaylistSearchResultResponse {
-            id: playlist.id,
-            name: playlist.name,
-            track_count: playlist.track_count,
-            image_url: playlist.image_url,
-        })
-        .collect())
+async fn user_playlists(
+    state: &AppState,
+    user_id: Uuid,
+    access_token: &str,
+) -> anyhow::Result<Vec<PlaylistSearchResultResponse>> {
+    Ok(
+        crate::spotify_cache::user_playlists(&state.pool, user_id, access_token)
+            .await?
+            .into_iter()
+            .map(|playlist| PlaylistSearchResultResponse {
+                id: playlist.id,
+                name: playlist.name,
+                track_count: playlist.track_count,
+                image_url: playlist.image_url,
+            })
+            .collect(),
+    )
 }
 
 async fn user_playlist_tracks(
+    state: &AppState,
     access_token: &str,
     playlists: &[PlaylistSearchResultResponse],
     limit: usize,
@@ -1830,16 +1840,19 @@ async fn user_playlist_tracks(
             break;
         }
 
-        let tracks = match spotify::playlist::get_tracks(access_token, &playlist.id).await {
-            Ok(tracks) => tracks,
-            Err(e) => {
-                tracing::warn!(
-                    playlist_id = playlist.id,
-                    "party library: failed to fetch playlist tracks: {e:#}"
-                );
-                continue;
-            }
-        };
+        let tracks =
+            match crate::spotify_cache::playlist_tracks(&state.pool, access_token, &playlist.id)
+                .await
+            {
+                Ok(cached) => cached.tracks,
+                Err(e) => {
+                    tracing::warn!(
+                        playlist_id = playlist.id,
+                        "party library: failed to fetch playlist tracks: {e:#}"
+                    );
+                    continue;
+                }
+            };
 
         for track in tracks {
             if results.len() >= limit {

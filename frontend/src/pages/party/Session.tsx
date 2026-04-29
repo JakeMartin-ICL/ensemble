@@ -37,16 +37,13 @@ import {
   updatePartySettings,
   votePartyQueueItem,
 } from '../../lib/party'
-import type { PlaybackState, TrackDetails, TrackSearchResult } from '../../lib/weave'
+import { type ObservedPlayback, currentProgress, formatTime, optimisticRestart, optimisticTogglePlaying } from '../../lib/playback'
+import type { TrackDetails, TrackSearchResult } from '../../lib/weave'
 import styles from '../../styles/Mode.module.css'
 
 const PARTY_SESSION_KEY = 'party_session_id'
 const PARTY_GUEST_SESSION_KEY = 'party_guest_session_id'
 const PARTY_GUEST_TOKEN_KEY = 'party_guest_session_token'
-
-interface ObservedPlayback extends PlaybackState {
-  observed_at: number
-}
 
 export default function PartySessionPage() {
   const [session, setSession] = useState<PartySession | null>(null)
@@ -403,20 +400,14 @@ export default function PartySessionPage() {
   function handlePlayPause() {
     if (!session?.is_host) return
     const action = playback?.is_playing ? pausePartySession : resumePartySession
-    setPlayback((current) => {
-      if (!current) return null
-      const now = Date.now()
-      return current.is_playing
-        ? { ...current, is_playing: false, progress_ms: currentProgress(current, now), observed_at: now }
-        : { ...current, is_playing: true, observed_at: now }
-    })
+    setPlayback(optimisticTogglePlaying)
     void action(session.id)
       .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
   }
 
   function handleRestart() {
     if (!session?.is_host) return
-    setPlayback((current) => current ? { ...current, is_playing: true, progress_ms: 0, observed_at: Date.now() } : null)
+    setPlayback(optimisticRestart)
     void restartPartySession(session.id)
       .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
   }
@@ -2074,21 +2065,6 @@ function mergeTrackResults(
   return merged
 }
 
-function currentProgress(playback: ObservedPlayback | null, now: number): number {
-  if (!playback) return 0
-  if (!playback.is_playing) return playback.progress_ms
-  return Math.min(
-    playback.duration_ms,
-    playback.progress_ms + Math.max(0, now - playback.observed_at),
-  )
-}
-
-function formatTime(ms: number): string {
-  const totalSeconds = Math.floor(ms / 1000)
-  const minutes = Math.floor(totalSeconds / 60)
-  const seconds = totalSeconds % 60
-  return `${minutes.toString()}:${seconds.toString().padStart(2, '0')}`
-}
 
 function initials(name: string): string {
   const parts = name

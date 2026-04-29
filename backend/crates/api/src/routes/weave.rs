@@ -258,25 +258,24 @@ async fn create_session(
 
     let mut playlists = Vec::with_capacity(body.playlist_ids.len());
     for playlist_id in body.playlist_ids {
-        let (tracks, name) = tokio::try_join!(
-            spotify::playlist::get_tracks(&access_token, &playlist_id),
-            playlist_name(&access_token, &playlist_id),
-        )
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
+        let cached =
+            crate::spotify_cache::playlist_tracks(&state.pool, &access_token, &playlist_id)
+                .await
+                .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
 
-        let mut order = tracks;
+        let mut order = cached.tracks;
         weave::session::shuffle(&mut order);
 
         if order.is_empty() {
             return Err(err(
                 StatusCode::UNPROCESSABLE_ENTITY,
-                format!("playlist {name} has no playable Spotify tracks"),
+                format!("playlist {} has no playable Spotify tracks", cached.name),
             ));
         }
 
         playlists.push(db::weave::PlaylistState {
-            id: playlist_id,
-            name,
+            id: cached.id,
+            name: cached.name,
             order: order
                 .into_iter()
                 .map(|track| db::weave::PlaylistTrack {
@@ -676,7 +675,7 @@ async fn get_playlists(
     let user_id = crate::routes::session::user_id_from_headers(&state.pool, &headers).await?;
     let access_token = get_access_token(&state, user_id).await?;
 
-    let playlists = spotify::playlist::get_user_playlists(&access_token)
+    let playlists = crate::spotify_cache::user_playlists(&state.pool, user_id, &access_token)
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
 
@@ -742,24 +741,6 @@ async fn get_verified_session(
     }
 
     Ok(session)
-}
-
-async fn playlist_name(access_token: &str, playlist_id: &str) -> anyhow::Result<String> {
-    #[derive(serde::Deserialize)]
-    struct Resp {
-        name: String,
-    }
-    let resp = reqwest::Client::new()
-        .get(format!(
-            "https://api.spotify.com/v1/playlists/{playlist_id}?fields=name"
-        ))
-        .bearer_auth(access_token)
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<Resp>()
-        .await?;
-    Ok(resp.name)
 }
 
 fn playback_uris(track_uri: &str, queued_track_uri: Option<&str>) -> Vec<String> {

@@ -5,7 +5,6 @@ import QueueList from '../../components/QueueList'
 import QueueTrackLabel from '../../components/QueueTrackLabel'
 import { supabase } from '../../lib/supabase'
 import {
-  type PlaybackState,
   type QueueItem,
   type QueueState,
   type Session,
@@ -25,6 +24,7 @@ import {
   skipSong,
   skipTurn,
 } from '../../lib/weave'
+import { type ObservedPlayback, currentProgress, formatTime, optimisticRestart, optimisticTogglePlaying } from '../../lib/playback'
 import styles from '../../styles/Mode.module.css'
 
 const PLAYLIST_COLORS = [
@@ -41,10 +41,6 @@ function hexAlpha(hex: string, alpha: number): string {
   const g = parseInt(hex.slice(3, 5), 16)
   const b = parseInt(hex.slice(5, 7), 16)
   return `rgba(${r.toString()}, ${g.toString()}, ${b.toString()}, ${alpha.toString()})`
-}
-
-interface ObservedPlayback extends PlaybackState {
-  observed_at: number
 }
 
 export default function WeaveSession() {
@@ -76,37 +72,25 @@ export default function WeaveSession() {
 
   useEffect(() => {
     if (!session?.id) return
-
-    const interval = window.setInterval(() => {
-      void getActiveSession().then((s) => {
-        if (!s) {
-          void navigate('/weave')
-          return
-        }
-        setSession(s)
-      }).catch((e: unknown) => {
-        setError(e instanceof Error ? e.message : String(e))
-      })
-    }, 2000)
-
-    return () => { window.clearInterval(interval) }
-  }, [navigate, session?.id])
-
-  useEffect(() => {
-    if (!session?.id) return
     const sessionId = session.id
+    let timerId = 0
 
-    function refreshPlayback() {
+    function poll() {
       void getPlayback(sessionId).then((p) => {
-        setPlayback(p ? { ...p, observed_at: Date.now() } : null)
+        const observed = p ? { ...p, observed_at: Date.now() } : null
+        setPlayback(observed)
+        const remaining = observed?.is_playing
+          ? observed.duration_ms - currentProgress(observed, Date.now())
+          : Infinity
+        timerId = window.setTimeout(poll, remaining <= 10_000 ? 1_000 : 10_000)
       }).catch((e: unknown) => {
         setError(e instanceof Error ? e.message : String(e))
+        timerId = window.setTimeout(poll, 10_000)
       })
     }
 
-    refreshPlayback()
-    const interval = window.setInterval(refreshPlayback, 2000)
-    return () => { window.clearInterval(interval) }
+    poll()
+    return () => { window.clearTimeout(timerId) }
   }, [session?.id])
 
   useEffect(() => {
@@ -120,8 +104,6 @@ export default function WeaveSession() {
     }
 
     refreshQueue()
-    const interval = window.setInterval(refreshQueue, 5000)
-    return () => { window.clearInterval(interval) }
   }, [queueOpen, session?.id])
 
   useEffect(() => {
@@ -155,19 +137,26 @@ export default function WeaveSession() {
           table: 'weave_sessions',
           filter: `id=eq.${session.id}`,
         },
-        () => {
-          void getActiveSession().then((s) => {
-            if (!s) {
-              void navigate('/weave')
-              return
+        (payload) => {
+          if (isInactiveRealtimeRow(payload.new)) {
+            void navigate('/weave')
+            return
+          }
+
+          const nextSession = sessionFromRealtimeRow(payload.new)
+          if (nextSession) {
+            setSession(nextSession)
+            if (queueOpen) {
+              void getQueue(nextSession.id).then(setQueue).catch((e: unknown) => {
+                setError(e instanceof Error ? e.message : String(e))
+              })
             }
-            setSession(s)
-          })
+          }
         },
       )
       .subscribe()
     return () => { void supabase.removeChannel(channel) }
-  }, [navigate, session?.id])
+  }, [navigate, queueOpen, session?.id])
 
   function handleSkipSong() {
     if (!session) return
@@ -208,20 +197,16 @@ export default function WeaveSession() {
   function handlePlayPause() {
     if (!session) return
     const action = playback?.is_playing ? pauseSession : resumeSession
+    setPlayback(optimisticTogglePlaying)
     void action(session.id)
-      .then((p) => { setPlayback(p ? { ...p, observed_at: Date.now() } : null) })
-      .catch((e: unknown) => {
-        setError(e instanceof Error ? e.message : String(e))
-      })
+      .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
   }
 
   function handleRestart() {
     if (!session) return
+    setPlayback(optimisticRestart)
     void restartSession(session.id)
-      .then((p) => { setPlayback(p ? { ...p, observed_at: Date.now() } : null) })
-      .catch((e: unknown) => {
-        setError(e instanceof Error ? e.message : String(e))
-      })
+      .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
   }
 
   function handleToggleQueue() {
@@ -364,6 +349,40 @@ export default function WeaveSession() {
       <button className={styles.endBtn} onClick={handleEnd}>End session</button>
     </div>
   )
+}
+
+function sessionFromRealtimeRow(row: unknown): Session | null {
+  if (!isRecord(row)) return null
+  const { id, playlists: rawPlaylists, current_playlist_index: currentPlaylistIndex } = row
+  if (typeof id !== 'string' || typeof currentPlaylistIndex !== 'number' || !Array.isArray(rawPlaylists)) {
+    return null
+  }
+
+  const playlists = rawPlaylists.flatMap((playlist): Session['playlists'] => {
+    if (!isRecord(playlist) || typeof playlist.id !== 'string' || typeof playlist.name !== 'string') {
+      return []
+    }
+    return [{ id: playlist.id, name: playlist.name }]
+  })
+  const current = playlists.at(currentPlaylistIndex)
+  const currentTrackUri = typeof row.current_track_uri === 'string' ? row.current_track_uri : null
+
+  return {
+    id,
+    playlists,
+    current_playlist_index: currentPlaylistIndex,
+    current_playlist_id: current?.id ?? '',
+    current_playlist_name: current?.name ?? '',
+    current_track_uri: currentTrackUri,
+  }
+}
+
+function isInactiveRealtimeRow(row: unknown): boolean {
+  return isRecord(row) && row.is_active === false
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
 }
 
 function IconSvg({ children }: { children: ReactNode }) {
@@ -728,20 +747,4 @@ function SpotifyIcon() {
       <path d="M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12S18.66 0 12 0zm5.521 17.34c-.24.359-.66.48-1.021.24-2.82-1.74-6.36-2.101-10.561-1.141-.418.122-.779-.179-.899-.539-.12-.421.18-.78.54-.9 4.56-1.021 8.52-.6 11.64 1.32.42.18.479.659.301 1.02zm1.44-3.3c-.301.42-.841.6-1.262.3-3.239-1.98-8.159-2.58-11.939-1.38-.479.12-1.02-.12-1.14-.6-.12-.48.12-1.021.6-1.141C9.6 9.9 15 10.561 18.72 12.84c.361.181.54.78.241 1.2zm.12-3.36C15.24 8.4 8.82 8.16 5.16 9.301c-.6.179-1.2-.181-1.38-.721-.18-.601.18-1.2.72-1.381 4.26-1.26 11.28-1.02 15.721 1.621.539.3.719 1.02.419 1.56-.299.421-1.02.599-1.559.3z" />
     </svg>
   )
-}
-
-function currentProgress(playback: ObservedPlayback | null, now: number): number {
-  if (!playback) return 0
-  if (!playback.is_playing) return playback.progress_ms
-  return Math.min(
-    playback.duration_ms,
-    playback.progress_ms + Math.max(0, now - playback.observed_at),
-  )
-}
-
-function formatTime(ms: number): string {
-  const totalSeconds = Math.floor(ms / 1000)
-  const minutes = Math.floor(totalSeconds / 60)
-  const seconds = totalSeconds % 60
-  return `${minutes.toString()}:${seconds.toString().padStart(2, '0')}`
 }

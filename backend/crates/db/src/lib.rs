@@ -2,6 +2,7 @@
 //! Wraps sqlx pool and exposes typed queries for each domain.
 
 pub mod party;
+pub mod spotify_cache;
 pub mod users;
 pub mod weave;
 
