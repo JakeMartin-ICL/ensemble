@@ -95,7 +95,7 @@ export default function QueueList<T extends PositionedItem>({
     for (let ci = 0; ci < partners.length; ci++) {
       const rect = originalRectsRef.current.get(getKey(partners[ci]))
       if (!rect) continue
-      if (pointerY < rect.top - scrollDelta + rect.height / 2) return ci
+      if (pointerY < rect.top - scrollDelta) return ci
     }
     return partners.length
   }
@@ -371,7 +371,11 @@ export default function QueueList<T extends PositionedItem>({
 
     const draggedItem = items.find((candidate) => getKey(candidate) === dragKeyRef.current)
     if (draggedItem) {
-      insertIdxRef.current = computeInsertIdx(e.clientY, draggedItem)
+      const draggedRect = originalRectsRef.current.get(getKey(draggedItem))
+      const draggedCenterY = draggedRect
+        ? draggedRect.top + (e.clientY - startYRef.current) + draggedRect.height / 2
+        : e.clientY
+      insertIdxRef.current = computeInsertIdx(draggedCenterY, draggedItem)
     }
 
     dragRafRef.current ??= requestAnimationFrame(() => {
