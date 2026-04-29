@@ -96,6 +96,7 @@ function SetupForm({ onStart }: { onStart: () => void }) {
   const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [playerPromptOpen, setPlayerPromptOpen] = useState(false)
 
   useEffect(() => {
     void getPlaylists()
@@ -107,11 +108,18 @@ function SetupForm({ onStart }: { onStart: () => void }) {
 
   function handleStart() {
     if (selected.length < 2) return
+    setError(null)
+    setPlayerPromptOpen(false)
     setLoading(true)
     void createSession(selected.map((p) => p.id))
       .then(() => { onStart(); })
       .catch((e: unknown) => {
-        setError(e instanceof Error ? e.message : String(e))
+        const message = e instanceof Error ? e.message : String(e)
+        if (isMissingSpotifyPlayer(message)) {
+          setPlayerPromptOpen(true)
+        } else {
+          setError(message)
+        }
         setLoading(false)
       })
   }
@@ -178,6 +186,48 @@ function SetupForm({ onStart }: { onStart: () => void }) {
           {loading ? 'Starting…' : 'Start session'}
         </button>
       </div>
+      {playerPromptOpen && (
+        <div
+          className={styles.dialogOverlay}
+          onClick={() => { setPlayerPromptOpen(false) }}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Start Spotify playback"
+        >
+          <div
+            className={`${styles.dialogPanel} ${styles.dialogPanelCompact} ${styles.spotifyPlayerDialog}`}
+            onClick={(e) => { e.stopPropagation() }}
+          >
+            <p className={styles.dialogConfirmText}>Start Spotify first</p>
+            <p className={styles.dialogConfirmSub}>
+              Open Spotify on your phone, desktop app, or web player and start playing anything.
+              Then return here and click OK.
+            </p>
+            <div className={styles.dialogConfirmBtns}>
+              <button
+                className={styles.ghostBtn}
+                onClick={() => { setPlayerPromptOpen(false) }}
+                type="button"
+              >
+                Cancel
+              </button>
+              <button
+                className={styles.primaryBtn}
+                onClick={handleStart}
+                type="button"
+                disabled={loading}
+              >
+                {loading ? 'Retrying…' : 'OK'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
+}
+
+function isMissingSpotifyPlayer(message: string): boolean {
+  return message.includes('Spotify has no available playback device')
+    || message.includes('Spotify found a playback device but did not provide a controllable device id')
 }

@@ -1808,6 +1808,10 @@
   margin-top: 8px;
 }
 
+.spotifyPlayerDialog {
+  max-width: 420px;
+}
+
 @keyframes overlayIn {
   from { opacity: 0; }
   to { opacity: 1; }
