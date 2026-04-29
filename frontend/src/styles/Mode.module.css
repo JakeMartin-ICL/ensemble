@@ -490,6 +490,13 @@
   }
 }
 
+.albumArtIdle {
+  filter: grayscale(1) saturate(0.45);
+  box-shadow:
+    0 0 54px rgba(148, 163, 184, 0.18),
+    0 34px 70px rgba(0, 0, 0, 0.78);
+}
+
 .trackInfo {
   display: flex;
   flex-direction: column;
@@ -800,9 +807,19 @@
   }
 }
 
+.progressDock {
+  width: min(400px, calc(100vw - 48px));
+  display: grid;
+  grid-template-columns: 34px minmax(0, 320px) 34px;
+  align-items: end;
+  justify-content: center;
+  gap: 12px;
+}
+
 .progressPanel {
-  width: min(320px, calc(100vw - 48px));
+  width: 100%;
   display: flex;
+  grid-column: 2;
   flex-direction: column;
   gap: 10px;
 }
@@ -831,6 +848,31 @@
   border-radius: inherit;
   transition: width 0.2s linear;
   box-shadow: 0 0 10px var(--accent-glow);
+}
+
+.progressPanelIdle .progressTimes {
+  color: rgba(148, 163, 184, 0.72);
+}
+
+.progressPanelIdle .progressTrack {
+  background: rgba(148, 163, 184, 0.18);
+}
+
+.progressPanelIdle .progressFill {
+  background: linear-gradient(90deg, #64748b, #94a3b8);
+  box-shadow: 0 0 8px rgba(148, 163, 184, 0.24);
+}
+
+.refreshHeartbeatBtn {
+  width: 34px;
+  height: 34px;
+  grid-column: 3;
+  color: var(--text-muted);
+}
+
+.refreshHeartbeatBtn .iconSvg {
+  width: 17px;
+  height: 17px;
 }
 
 .transportControls {

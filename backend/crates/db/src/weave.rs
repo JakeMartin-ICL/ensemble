@@ -76,6 +76,11 @@ pub struct WeaveSession {
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub playback_track_uri: Option<String>,
+    pub playback_progress_ms: Option<i64>,
+    pub playback_duration_ms: Option<i64>,
+    pub playback_is_playing: Option<bool>,
+    pub playback_updated_at: Option<DateTime<Utc>>,
 }
 
 impl WeaveSession {
@@ -118,7 +123,9 @@ pub async fn create_session(pool: &PgPool, s: &NewWeaveSession) -> anyhow::Resul
              playlist_track_indexes, current_track_uri, queued_track_uri)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         RETURNING id, host_user_id, playlists, current_playlist_index, playlist_track_indexes,
-                  current_track_uri, queued_track_uri, is_active, created_at, updated_at
+                  current_track_uri, queued_track_uri, is_active, created_at, updated_at,
+                  playback_track_uri, playback_progress_ms, playback_duration_ms,
+                  playback_is_playing, playback_updated_at
         "#,
     )
     .bind(s.host_user_id)
@@ -146,7 +153,9 @@ pub async fn get_active_session(
     let session = sqlx::query_as::<_, WeaveSession>(
         r#"
         SELECT id, host_user_id, playlists, current_playlist_index, playlist_track_indexes,
-               current_track_uri, queued_track_uri, is_active, created_at, updated_at
+               current_track_uri, queued_track_uri, is_active, created_at, updated_at,
+               playback_track_uri, playback_progress_ms, playback_duration_ms,
+               playback_is_playing, playback_updated_at
         FROM public.weave_sessions
         WHERE host_user_id = $1 AND is_active = true
         ORDER BY created_at DESC
@@ -164,7 +173,9 @@ pub async fn get_session(pool: &PgPool, session_id: Uuid) -> anyhow::Result<Opti
     let session = sqlx::query_as::<_, WeaveSession>(
         r#"
         SELECT id, host_user_id, playlists, current_playlist_index, playlist_track_indexes,
-               current_track_uri, queued_track_uri, is_active, created_at, updated_at
+               current_track_uri, queued_track_uri, is_active, created_at, updated_at,
+               playback_track_uri, playback_progress_ms, playback_duration_ms,
+               playback_is_playing, playback_updated_at
         FROM public.weave_sessions
         WHERE id = $1
         "#,
@@ -245,6 +256,33 @@ pub async fn set_queued_track(
     .execute(pool)
     .await
     .context("setting queued track")?;
+    Ok(())
+}
+
+pub async fn update_playback_state(
+    pool: &PgPool,
+    session_id: Uuid,
+    track_uri: &str,
+    progress_ms: i64,
+    duration_ms: i64,
+    is_playing: bool,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE public.weave_sessions
+        SET playback_track_uri = $1, playback_progress_ms = $2, playback_duration_ms = $3,
+            playback_is_playing = $4, playback_updated_at = now()
+        WHERE id = $5
+        "#,
+    )
+    .bind(track_uri)
+    .bind(progress_ms)
+    .bind(duration_ms)
+    .bind(is_playing)
+    .bind(session_id)
+    .execute(pool)
+    .await
+    .context("updating weave playback state")?;
     Ok(())
 }
 

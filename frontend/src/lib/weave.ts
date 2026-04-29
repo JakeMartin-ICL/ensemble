@@ -39,6 +39,7 @@ export interface PlaybackState {
   progress_ms: number
   duration_ms: number
   is_playing: boolean
+  observed_at_ms: number
 }
 
 export interface QueueItem {
@@ -95,6 +96,9 @@ export const skipTurn = (id: string) =>
 
 export const getPlayback = (id: string) =>
   get<PlaybackState | null>(`/weave/sessions/${id}/playback`)
+
+export const restartHeartbeat = (id: string) =>
+  post<PlaybackState | null>(`/weave/sessions/${id}/heartbeat`, {})
 
 export const pauseSession = (id: string) =>
   post<PlaybackState | null>(`/weave/sessions/${id}/pause`, {})

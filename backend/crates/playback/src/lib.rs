@@ -68,6 +68,7 @@ where
     let mut queued_for: Option<String> = None;
     let mut sleep_ms = 10_000u64;
     let mut cached_user: Option<CachedUserToken> = None;
+    let mut paused_observations = 0u8;
 
     loop {
         tokio::time::sleep(tokio::time::Duration::from_millis(sleep_ms)).await;
@@ -89,7 +90,16 @@ where
 
         let playback = match spotify::player::get_playback_state(&access_token).await {
             Ok(Some(p)) => p,
-            Ok(None) => continue,
+            Ok(None) => {
+                paused_observations = paused_observations.saturating_add(1);
+                if paused_observations >= 3 {
+                    info!(
+                        "{label} heartbeat: session {session_id} had no playback for three polls, stopping"
+                    );
+                    return Ok(());
+                }
+                continue;
+            }
             Err(e) => {
                 warn!("{label} heartbeat: error fetching playback: {e:#}");
                 continue;
@@ -98,6 +108,16 @@ where
 
         if let Err(e) = driver.update_playback(&playback).await {
             warn!("{label} heartbeat: failed to update playback state: {e:#}");
+        }
+
+        if playback.is_playing {
+            paused_observations = 0;
+        } else {
+            paused_observations = paused_observations.saturating_add(1);
+            if paused_observations >= 3 {
+                info!("{label} heartbeat: session {session_id} paused for three polls, stopping");
+                return Ok(());
+            }
         }
 
         if driver.current_track_uri(&session) != Some(playback.track_uri.as_str()) {

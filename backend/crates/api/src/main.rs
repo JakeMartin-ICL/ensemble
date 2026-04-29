@@ -27,10 +27,16 @@ pub struct CachedSpotifyToken {
 }
 
 #[derive(Clone)]
+pub struct HeartbeatTask {
+    pub run_id: Uuid,
+    pub abort_handle: AbortHandle,
+}
+
+#[derive(Clone)]
 pub struct AppState {
     pub pool: db::PgPool,
     pub spotify_redirect_uri: String,
-    pub heartbeat_tasks: Arc<DashMap<Uuid, AbortHandle>>,
+    pub heartbeat_tasks: Arc<DashMap<Uuid, HeartbeatTask>>,
     pub auth_sessions: Arc<DashMap<String, CachedAuthSession>>,
     pub spotify_tokens: Arc<DashMap<Uuid, CachedSpotifyToken>>,
 }

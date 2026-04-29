@@ -12,7 +12,7 @@ use serde_json::Value;
 use std::{collections::HashMap, collections::HashSet, str::FromStr};
 use uuid::Uuid;
 
-use crate::AppState;
+use crate::{AppState, HeartbeatTask};
 
 type ApiResult<T> = Result<Json<T>, (StatusCode, Json<Value>)>;
 
@@ -72,14 +72,25 @@ pub fn router() -> Router<AppState> {
 }
 
 fn spawn_heartbeat(state: &AppState, session_id: Uuid) {
+    let run_id = Uuid::new_v4();
     let params = party::heartbeat::HeartbeatParams {
         session_id,
         pool: state.pool.clone(),
     };
+    let heartbeat_tasks = state.heartbeat_tasks.clone();
 
-    let fut = party::heartbeat::run(params);
+    let fut = async move {
+        party::heartbeat::run(params).await;
+        heartbeat_tasks.remove_if(&session_id, |_, task| task.run_id == run_id);
+    };
     let handle = tokio::spawn(fut).abort_handle();
-    state.heartbeat_tasks.insert(session_id, handle);
+    state.heartbeat_tasks.insert(
+        session_id,
+        HeartbeatTask {
+            run_id,
+            abort_handle: handle,
+        },
+    );
 }
 
 fn ensure_heartbeat(state: &AppState, session: &db::party::PartySession) {
@@ -89,8 +100,8 @@ fn ensure_heartbeat(state: &AppState, session: &db::party::PartySession) {
 }
 
 fn stop_heartbeat(state: &AppState, session_id: Uuid) {
-    if let Some((_, handle)) = state.heartbeat_tasks.remove(&session_id) {
-        handle.abort();
+    if let Some((_, task)) = state.heartbeat_tasks.remove(&session_id) {
+        task.abort_handle.abort();
     }
 }
 
@@ -645,6 +656,8 @@ async fn pause_session(
         }
     }
 
+    ensure_heartbeat(&state, &session);
+
     Ok(Json(playback.map(Into::into)))
 }
 
@@ -682,6 +695,8 @@ async fn resume_session(
             tracing::warn!("failed to cache playback state after resume: {e:#}");
         }
     }
+
+    ensure_heartbeat(&state, &session);
 
     Ok(Json(playback.map(Into::into)))
 }
@@ -721,6 +736,8 @@ async fn restart_session(
         }
     }
 
+    ensure_heartbeat(&state, &session);
+
     Ok(Json(playback.map(Into::into)))
 }
 
@@ -748,6 +765,16 @@ async fn skip_to_next(
     db::party::set_current_track(&state.pool, session_id, Some(&item.track.uri))
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    db::party::update_playback_state(
+        &state.pool,
+        session_id,
+        &item.track.uri,
+        0,
+        item.track.duration_ms.unwrap_or(0) as i64,
+        true,
+    )
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     db::party::add_played_track(
         &state.pool,
         &db::party::NewPartyPlayedTrack {
@@ -764,6 +791,7 @@ async fn skip_to_next(
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let updated = get_existing_session(&state, session_id).await?;
+    ensure_heartbeat(&state, &updated);
     Ok(Json(session_response(updated, &actor, None)))
 }
 

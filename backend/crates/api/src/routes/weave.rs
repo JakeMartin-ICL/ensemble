@@ -9,7 +9,7 @@ use axum::{
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::AppState;
+use crate::{AppState, HeartbeatTask};
 
 type ApiResult<T> = Result<Json<T>, (StatusCode, Json<Value>)>;
 
@@ -31,6 +31,7 @@ pub fn router() -> Router<AppState> {
         .route("/sessions/{id}/skip-song", post(skip_song))
         .route("/sessions/{id}/skip-turn", post(skip_turn))
         .route("/sessions/{id}/playback", get(get_playback))
+        .route("/sessions/{id}/heartbeat", post(restart_heartbeat))
         .route("/sessions/{id}/pause", post(pause_session))
         .route("/sessions/{id}/resume", post(resume_session))
         .route("/sessions/{id}/restart", post(restart_session))
@@ -73,6 +74,7 @@ struct PlaybackResponse {
     progress_ms: u64,
     duration_ms: u64,
     is_playing: bool,
+    observed_at_ms: i64,
 }
 
 #[derive(serde::Serialize)]
@@ -154,6 +156,7 @@ impl From<spotify::player::PlaybackState> for PlaybackResponse {
             progress_ms: state.progress_ms,
             duration_ms: state.duration_ms,
             is_playing: state.is_playing,
+            observed_at_ms: chrono::Utc::now().timestamp_millis(),
         }
     }
 }
@@ -190,19 +193,86 @@ async fn get_access_token(
 }
 
 fn spawn_heartbeat(state: &AppState, session_id: Uuid) {
+    let run_id = Uuid::new_v4();
     let params = weave::heartbeat::HeartbeatParams {
         session_id,
         pool: state.pool.clone(),
     };
+    let heartbeat_tasks = state.heartbeat_tasks.clone();
 
-    let fut = weave::heartbeat::run(params);
+    let fut = async move {
+        weave::heartbeat::run(params).await;
+        heartbeat_tasks.remove_if(&session_id, |_, task| task.run_id == run_id);
+    };
     let handle = tokio::spawn(fut).abort_handle();
-    state.heartbeat_tasks.insert(session_id, handle);
+    state.heartbeat_tasks.insert(
+        session_id,
+        HeartbeatTask {
+            run_id,
+            abort_handle: handle,
+        },
+    );
 }
 
 fn stop_heartbeat(state: &AppState, session_id: Uuid) {
-    if let Some((_, handle)) = state.heartbeat_tasks.remove(&session_id) {
-        handle.abort();
+    if let Some((_, task)) = state.heartbeat_tasks.remove(&session_id) {
+        task.abort_handle.abort();
+    }
+}
+
+fn ensure_heartbeat(state: &AppState, session: &db::weave::WeaveSession) {
+    if session.is_active && !state.heartbeat_tasks.contains_key(&session.id) {
+        spawn_heartbeat(state, session.id);
+    }
+}
+
+fn playback_from_session(session: &db::weave::WeaveSession) -> Option<PlaybackResponse> {
+    Some(PlaybackResponse {
+        track_uri: session.playback_track_uri.clone()?,
+        progress_ms: session.playback_progress_ms? as u64,
+        duration_ms: session.playback_duration_ms? as u64,
+        is_playing: session.playback_is_playing?,
+        observed_at_ms: session.playback_updated_at?.timestamp_millis(),
+    })
+}
+
+fn advance_duration_ms(
+    session: &db::weave::WeaveSession,
+    advance: &weave::session::Advance,
+) -> i64 {
+    usize::try_from(advance.playlist_index)
+        .ok()
+        .and_then(|playlist_index| {
+            let track_index = usize::try_from(*advance.track_indexes.get(playlist_index)?).ok()?;
+            session
+                .playlists()
+                .get(playlist_index)?
+                .order
+                .get(track_index)?
+                .duration_ms
+        })
+        .unwrap_or(0) as i64
+}
+
+async fn cache_playback(
+    state: &AppState,
+    session_id: Uuid,
+    playback: Option<&spotify::player::PlaybackState>,
+    context: &str,
+) {
+    if let Some(p) = playback {
+        if let Err(e) = db::weave::update_playback_state(
+            &state.pool,
+            session_id,
+            &p.track_uri,
+            p.progress_ms as i64,
+            p.duration_ms as i64,
+            p.is_playing,
+        )
+        .await
+        {
+            tracing::warn!("failed to cache playback state after {context}: {e:#}");
+        }
     }
 }
 
@@ -255,6 +325,7 @@ async fn create_session(
     }
 
     let first_track = playlists[0].order[0].uri.clone();
+    let first_duration_ms = playlists[0].order[0].duration_ms.unwrap_or(0);
 
     spotify::player::start_track(&access_token, &first_track)
         .await
@@ -278,6 +349,17 @@ async fn create_session(
     .await
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
+    db::weave::update_playback_state(
+        &state.pool,
+        session.id,
+        &first_track,
+        0,
+        first_duration_ms as i64,
+        true,
+    )
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
     stop_heartbeat(&state, session.id);
     spawn_heartbeat(&state, session.id);
 
@@ -295,9 +377,7 @@ async fn get_active_session(
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     if let Some(ref s) = session {
-        if !state.heartbeat_tasks.contains_key(&s.id) {
-            spawn_heartbeat(&state, s.id);
-        }
+        ensure_heartbeat(&state, s);
     }
 
     Ok(Json(session.map(Into::into)))
@@ -329,10 +409,23 @@ async fn skip_song(
     .await
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
+    db::weave::update_playback_state(
+        &state.pool,
+        session_id,
+        &advance.track_uri,
+        0,
+        advance_duration_ms(&session, &advance),
+        true,
+    )
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
     let updated = db::weave::get_session(&state.pool, session_id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "session not found"))?;
+
+    ensure_heartbeat(&state, &updated);
 
     Ok(Json(updated.into()))
 }
@@ -363,10 +456,23 @@ async fn skip_turn(
     .await
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
+    db::weave::update_playback_state(
+        &state.pool,
+        session_id,
+        &advance.track_uri,
+        0,
+        advance_duration_ms(&session, &advance),
+        true,
+    )
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
     let updated = db::weave::get_session(&state.pool, session_id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "session not found"))?;
+
+    ensure_heartbeat(&state, &updated);
 
     Ok(Json(updated.into()))
 }
@@ -377,14 +483,23 @@ async fn get_playback(
     Path(session_id): Path<Uuid>,
 ) -> ApiResult<Option<PlaybackResponse>> {
     let user_id = crate::routes::session::cached_user_id_from_headers(&state, &headers).await?;
-    get_verified_session(&state, session_id, user_id).await?;
-    let access_token = get_access_token(&state, user_id).await?;
+    let session = get_verified_session(&state, session_id, user_id).await?;
 
-    let playback = spotify::player::get_playback_state(&access_token)
-        .await
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
+    Ok(Json(playback_from_session(&session)))
+}
 
-    Ok(Json(playback.map(Into::into)))
+async fn restart_heartbeat(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<Uuid>,
+) -> ApiResult<Option<PlaybackResponse>> {
+    let user_id = crate::routes::session::cached_user_id_from_headers(&state, &headers).await?;
+    let session = get_verified_session(&state, session_id, user_id).await?;
+    stop_heartbeat(&state, session_id);
+    if session.is_active {
+        spawn_heartbeat(&state, session_id);
+    }
+    Ok(Json(playback_from_session(&session)))
 }
 
 async fn pause_session(
@@ -393,7 +508,7 @@ async fn pause_session(
     Path(session_id): Path<Uuid>,
 ) -> ApiResult<Option<PlaybackResponse>> {
     let user_id = crate::routes::session::cached_user_id_from_headers(&state, &headers).await?;
-    get_verified_session(&state, session_id, user_id).await?;
+    let session = get_verified_session(&state, session_id, user_id).await?;
     let access_token = get_access_token(&state, user_id).await?;
 
     spotify::player::pause_playback(&access_token)
@@ -404,6 +519,9 @@ async fn pause_session(
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
 
+    cache_playback(&state, session_id, playback.as_ref(), "pause").await;
+    ensure_heartbeat(&state, &session);
+
     Ok(Json(playback.map(Into::into)))
 }
 
@@ -413,7 +531,7 @@ async fn resume_session(
     Path(session_id): Path<Uuid>,
 ) -> ApiResult<Option<PlaybackResponse>> {
     let user_id = crate::routes::session::cached_user_id_from_headers(&state, &headers).await?;
-    get_verified_session(&state, session_id, user_id).await?;
+    let session = get_verified_session(&state, session_id, user_id).await?;
     let access_token = get_access_token(&state, user_id).await?;
 
     spotify::player::resume_playback(&access_token)
@@ -424,6 +542,9 @@ async fn resume_session(
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
 
+    cache_playback(&state, session_id, playback.as_ref(), "resume").await;
+    ensure_heartbeat(&state, &session);
+
     Ok(Json(playback.map(Into::into)))
 }
 
@@ -433,7 +554,7 @@ async fn restart_session(
     Path(session_id): Path<Uuid>,
 ) -> ApiResult<Option<PlaybackResponse>> {
     let user_id = crate::routes::session::cached_user_id_from_headers(&state, &headers).await?;
-    get_verified_session(&state, session_id, user_id).await?;
+    let session = get_verified_session(&state, session_id, user_id).await?;
     let access_token = get_access_token(&state, user_id).await?;
 
     spotify::player::seek_to_start(&access_token)
@@ -443,6 +564,9 @@ async fn restart_session(
     let playback = spotify::player::get_playback_state(&access_token)
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
+
+    cache_playback(&state, session_id, playback.as_ref(), "restart").await;
+    ensure_heartbeat(&state, &session);
 
     Ok(Json(playback.map(Into::into)))
 }

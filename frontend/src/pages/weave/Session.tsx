@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import QueueList from '../../components/QueueList'
@@ -18,6 +18,7 @@ import {
   getTrack,
   pauseSession,
   restartSession,
+  restartHeartbeat,
   reorderPlaylistQueue,
   resumeSession,
   searchQueueTracks,
@@ -49,8 +50,11 @@ export default function WeaveSession() {
   const [playback, setPlayback] = useState<ObservedPlayback | null>(null)
   const [queue, setQueue] = useState<QueueState | null>(null)
   const [queueOpen, setQueueOpen] = useState(false)
+  const [heartbeatIdle, setHeartbeatIdle] = useState(false)
   const [now, setNow] = useState(() => Date.now())
   const [error, setError] = useState<string | null>(null)
+  const pausedObservationCountRef = useRef(0)
+  const lastPausedObservedAtRef = useRef<number | null>(null)
   const navigate = useNavigate()
 
   const playlistColors = useMemo<Map<string, string>>(() => {
@@ -71,14 +75,36 @@ export default function WeaveSession() {
   }, [navigate])
 
   useEffect(() => {
+    pausedObservationCountRef.current = 0
+    lastPausedObservedAtRef.current = null
+    setHeartbeatIdle(false)
+  }, [session?.id])
+
+  useEffect(() => {
     if (!session?.id) return
+    if (heartbeatIdle) return
     const sessionId = session.id
     let timerId = 0
 
     function poll() {
       void getPlayback(sessionId).then((p) => {
-        const observed = p ? { ...p, observed_at: Date.now() } : null
-        setPlayback(observed)
+        const observed = p ? { ...p, observed_at: p.observed_at_ms } : null
+        setPlayback((current) => {
+          if (!observed) return null
+          if (current && observed.observed_at < current.observed_at) return current
+          return observed
+        })
+        if (observed?.is_playing) {
+          pausedObservationCountRef.current = 0
+          lastPausedObservedAtRef.current = null
+        } else if (observed && observed.observed_at !== lastPausedObservedAtRef.current) {
+          pausedObservationCountRef.current += 1
+          lastPausedObservedAtRef.current = observed.observed_at
+        }
+        if (pausedObservationCountRef.current >= 3) {
+          setHeartbeatIdle(true)
+          return
+        }
         const remaining = observed?.is_playing
           ? observed.duration_ms - currentProgress(observed, Date.now())
           : Infinity
@@ -91,7 +117,7 @@ export default function WeaveSession() {
 
     poll()
     return () => { window.clearTimeout(timerId) }
-  }, [session?.id])
+  }, [heartbeatIdle, session?.id])
 
   useEffect(() => {
     if (!session?.id || !queueOpen) return
@@ -160,6 +186,7 @@ export default function WeaveSession() {
 
   function handleSkipSong() {
     if (!session) return
+    wakeHeartbeatUi()
     void skipSong(session.id)
       .then((s) => {
         setSession(s)
@@ -170,7 +197,7 @@ export default function WeaveSession() {
         }
         return getPlayback(s.id)
       })
-      .then((p) => { setPlayback(p ? { ...p, observed_at: Date.now() } : null) })
+      .then((p) => { setPlayback(p ? { ...p, observed_at: p.observed_at_ms } : null) })
       .catch((e: unknown) => {
         setError(e instanceof Error ? e.message : String(e))
       })
@@ -178,6 +205,7 @@ export default function WeaveSession() {
 
   function handleSkipTurn() {
     if (!session) return
+    wakeHeartbeatUi()
     void skipTurn(session.id)
       .then((s) => {
         setSession(s)
@@ -188,7 +216,7 @@ export default function WeaveSession() {
         }
         return getPlayback(s.id)
       })
-      .then((p) => { setPlayback(p ? { ...p, observed_at: Date.now() } : null) })
+      .then((p) => { setPlayback(p ? { ...p, observed_at: p.observed_at_ms } : null) })
       .catch((e: unknown) => {
         setError(e instanceof Error ? e.message : String(e))
       })
@@ -197,16 +225,34 @@ export default function WeaveSession() {
   function handlePlayPause() {
     if (!session) return
     const action = playback?.is_playing ? pauseSession : resumeSession
+    wakeHeartbeatUi()
     setPlayback(optimisticTogglePlaying)
     void action(session.id)
+      .then((p) => { setPlayback(p ? { ...p, observed_at: p.observed_at_ms } : null) })
       .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
   }
 
   function handleRestart() {
     if (!session) return
+    wakeHeartbeatUi()
     setPlayback(optimisticRestart)
     void restartSession(session.id)
+      .then((p) => { setPlayback(p ? { ...p, observed_at: p.observed_at_ms } : null) })
       .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
+  }
+
+  function handleRefreshHeartbeat() {
+    if (!session) return
+    wakeHeartbeatUi(playback?.observed_at ?? null)
+    void restartHeartbeat(session.id)
+      .then((p) => { setPlayback(p ? { ...p, observed_at: p.observed_at_ms } : null) })
+      .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
+  }
+
+  function wakeHeartbeatUi(ignorePausedObservedAt: number | null = null) {
+    pausedObservationCountRef.current = 0
+    lastPausedObservedAtRef.current = ignorePausedObservedAt
+    setHeartbeatIdle(false)
   }
 
   function handleToggleQueue() {
@@ -254,7 +300,11 @@ export default function WeaveSession() {
     <div className={styles.sessionPage}>
       <div className={styles.nowPlaying}>
         {track?.album_art_url && (
-          <img className={styles.albumArt} src={track.album_art_url} alt="" />
+          <img
+            className={`${styles.albumArt} ${heartbeatIdle ? styles.albumArtIdle : ''}`}
+            src={track.album_art_url}
+            alt=""
+          />
         )}
         <div className={styles.trackInfo}>
           <span className={styles.trackName}>{track?.name ?? '—'}</span>
@@ -325,14 +375,27 @@ export default function WeaveSession() {
             <SkipTurnIcon />
           </button>
         </div>
-        <div className={styles.progressPanel}>
-          <div className={styles.progressTimes}>
-            <span>{formatTime(progressMs)}</span>
-            <span>{formatTime(durationMs)}</span>
+        <div className={styles.progressDock}>
+          <div className={`${styles.progressPanel} ${heartbeatIdle ? styles.progressPanelIdle : ''}`}>
+            <div className={styles.progressTimes}>
+              <span>{formatTime(progressMs)}</span>
+              <span>{formatTime(durationMs)}</span>
+            </div>
+            <div className={styles.progressTrack}>
+              <div className={styles.progressFill} style={{ width: `${progressPct.toString()}%` }} />
+            </div>
           </div>
-          <div className={styles.progressTrack}>
-            <div className={styles.progressFill} style={{ width: `${progressPct.toString()}%` }} />
-          </div>
+          {heartbeatIdle && (
+            <button
+              className={`${styles.iconBtn} ${styles.refreshHeartbeatBtn}`}
+              onClick={handleRefreshHeartbeat}
+              aria-label="Refresh playback"
+              title="Refresh playback"
+              type="button"
+            >
+              <RefreshIcon />
+            </button>
+          )}
         </div>
       </div>
 
@@ -413,6 +476,14 @@ function RestartIcon() {
   return (
     <IconSvg>
       <path d="M5 5h2v14H5zM19 5v14l-10-7z" />
+    </IconSvg>
+  )
+}
+
+function RefreshIcon() {
+  return (
+    <IconSvg>
+      <path d="M17.65 6.35A7.95 7.95 0 0 0 12 4a8 8 0 1 0 7.75 10h-2.1A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h8V3z" />
     </IconSvg>
   )
 }
