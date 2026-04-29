@@ -80,6 +80,7 @@ export default function PartySessionPage() {
   const [duplicatePulse, setDuplicatePulse] = useState<{ itemId: string; token: number } | null>(null)
   const duplicatePulseTokenRef = useRef(0)
   const pendingRemovedIdsRef = useRef<Set<string>>(new Set())
+  const optimisticTrackRef = useRef<{ uri: string; until: number } | null>(null)
   const libraryRequestRef = useRef<Promise<void> | null>(null)
   const modeButtonRef = useRef<HTMLButtonElement | null>(null)
   const modePanelRef = useRef<HTMLDivElement | null>(null)
@@ -234,6 +235,7 @@ export default function PartySessionPage() {
       if (!session) return
       void getPartyPlayback(session.id)
         .then((p) => {
+          if (!shouldAcceptPlayback(p)) return
           setPlayback((current) => {
             if (!p) return null
             // Ignore stale DB snapshots: the heartbeat writes every 10s, but
@@ -389,29 +391,87 @@ export default function PartySessionPage() {
 
   function handleSkip() {
     if (!session?.is_host) return
+    const nextItem = queue.items.at(0)
+    if (nextItem) {
+      optimisticTrackRef.current = {
+        uri: nextItem.uri,
+        until: Date.now() + 12_000,
+      }
+      pendingRemovedIdsRef.current.add(nextItem.id)
+      setQueue(removeQueueItemOptimistic(queue, nextItem.id))
+      setSession((current) => current ? { ...current, current_track_uri: nextItem.uri } : current)
+      setTrack(trackDetailsFromPartyItem(nextItem))
+      setPlayback(playbackFromPartyItem(nextItem))
+    }
     void skipPartySession(session.id)
       .then((s) => {
         setSession(s)
+        if (nextItem) pendingRemovedIdsRef.current.delete(nextItem.id)
         refreshQueues(s.id)
         return getPartyPlayback(s.id)
       })
-      .then((p) => { setPlayback(p ? { ...p, observed_at: p.observed_at_ms } : null) })
-      .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
+      .then((p) => {
+        if (shouldAcceptPlayback(p)) {
+          setPlayback(p ? { ...p, observed_at: p.observed_at_ms } : null)
+        }
+      })
+      .catch((e: unknown) => {
+        if (nextItem) pendingRemovedIdsRef.current.delete(nextItem.id)
+        refreshQueue()
+        setError(e instanceof Error ? e.message : String(e))
+      })
   }
 
   function handlePlayPause() {
     if (!session?.is_host) return
-    const action = playback?.is_playing ? pausePartySession : resumePartySession
+    const wasPlaying = playback?.is_playing ?? false
+    const action = wasPlaying ? pausePartySession : resumePartySession
     setPlayback(optimisticTogglePlaying)
     void action(session.id)
-      .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
+      .then((p) => {
+        if (shouldAcceptPlayback(p)) {
+          setPlayback(p ? { ...p, observed_at: p.observed_at_ms } : null)
+        }
+      })
+      .catch((e: unknown) => {
+        setPlayback((current) => current ? { ...current, is_playing: wasPlaying } : current)
+        setError(e instanceof Error ? e.message : String(e))
+      })
   }
 
   function handleRestart() {
     if (!session?.is_host) return
     setPlayback(optimisticRestart)
     void restartPartySession(session.id)
-      .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
+      .then((p) => {
+        if (shouldAcceptPlayback(p)) {
+          setPlayback(p ? { ...p, observed_at: p.observed_at_ms } : null)
+        }
+      })
+      .catch((e: unknown) => {
+        void getPartyPlayback(session.id)
+          .then((p) => {
+            if (shouldAcceptPlayback(p)) {
+              setPlayback(p ? { ...p, observed_at: p.observed_at_ms } : null)
+            }
+          })
+          .catch(() => undefined)
+        setError(e instanceof Error ? e.message : String(e))
+      })
+  }
+
+  function shouldAcceptPlayback(p: { track_uri: string } | null): boolean {
+    const guard = optimisticTrackRef.current
+    if (!guard) return true
+    if (!p || Date.now() > guard.until) {
+      optimisticTrackRef.current = null
+      return true
+    }
+    if (p.track_uri === guard.uri) {
+      optimisticTrackRef.current = null
+      return true
+    }
+    return false
   }
 
   function handleEnd() {
@@ -2123,6 +2183,27 @@ function removeQueueItemOptimistic(queue: PartyQueueState, itemId: string): Part
     items: queue.items
       .filter((candidate) => candidate.id !== itemId)
       .map((candidate, position) => ({ ...candidate, position })),
+  }
+}
+
+function trackDetailsFromPartyItem(item: PartyQueueItem): TrackDetails {
+  return {
+    name: item.name ?? 'Unknown track',
+    artist: item.artist ?? 'Unknown artist',
+    album_art_url: item.album_art_url,
+    duration_ms: item.duration_ms ?? 0,
+  }
+}
+
+function playbackFromPartyItem(item: PartyQueueItem): ObservedPlayback {
+  const now = Date.now()
+  return {
+    track_uri: item.uri,
+    progress_ms: 0,
+    duration_ms: item.duration_ms ?? 0,
+    is_playing: true,
+    observed_at_ms: now,
+    observed_at: now,
   }
 }
 

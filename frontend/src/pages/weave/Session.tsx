@@ -7,6 +7,7 @@ import { supabase } from '../../lib/supabase'
 import {
   type QueueItem,
   type QueueState,
+  type PlaybackState,
   type Session,
   type TrackSearchResult,
   type TrackDetails,
@@ -59,6 +60,7 @@ export default function WeaveSession() {
   const pausedObservationCountRef = useRef(0)
   const lastPausedObservedAtRef = useRef<number | null>(null)
   const lastForegroundRefreshAtRef = useRef(0)
+  const optimisticTrackRef = useRef<{ uri: string; until: number } | null>(null)
   const navigate = useNavigate()
 
   const playlistColors = useMemo<Map<string, string>>(() => {
@@ -93,6 +95,10 @@ export default function WeaveSession() {
     function poll() {
       void getPlayback(sessionId).then((p) => {
         const observed = p ? { ...p, observed_at: p.observed_at_ms } : null
+        if (!shouldAcceptPlayback(observed)) {
+          timerId = window.setTimeout(poll, 1_000)
+          return
+        }
         setPlayback((current) => {
           if (!observed) return null
           if (current && observed.observed_at < current.observed_at) return current
@@ -155,7 +161,7 @@ export default function WeaveSession() {
         .then((p) => {
           setPlaybackError(null)
           setPlayerPromptOpen(false)
-          setPlayback(p ? { ...p, observed_at: p.observed_at_ms } : null)
+          applyPlaybackResponse(p)
         })
         .catch((e: unknown) => {
           const message = errorMessage(e)
@@ -225,7 +231,19 @@ export default function WeaveSession() {
 
   function handleSkipSong() {
     if (!session) return
+    const optimistic = optimisticSkipSong(session, queue)
     wakeHeartbeatUi()
+    setPlaybackError(null)
+    setPlayerPromptOpen(false)
+    if (optimistic) {
+      optimisticTrackRef.current = {
+        uri: optimistic.item.uri,
+        until: Date.now() + 12_000,
+      }
+      setSession(optimistic.session)
+      setTrack(trackDetailsFromQueueItem(optimistic.item))
+      setPlayback(playbackFromQueueItem(optimistic.item))
+    }
     void skipSong(session.id)
       .then((s) => {
         setSession(s)
@@ -236,15 +254,44 @@ export default function WeaveSession() {
         }
         return getPlayback(s.id)
       })
-      .then((p) => { setPlayback(p ? { ...p, observed_at: p.observed_at_ms } : null) })
+      .then((p) => {
+        setPlaybackError(null)
+        setPlayerPromptOpen(false)
+        applyPlaybackResponse(p)
+      })
       .catch((e: unknown) => {
-        setError(e instanceof Error ? e.message : String(e))
+        const message = errorMessage(e)
+        if (isSpotifyPlayerActivationError(message)) {
+          setPlayerPromptOpen(true)
+        } else {
+          setPlaybackError(message)
+        }
+        void getActiveSession().then((s) => {
+          setSession(s)
+          if (s?.id) {
+            void getPlayback(s.id)
+              .then(applyPlaybackResponse)
+              .catch(() => undefined)
+          }
+        }).catch(() => undefined)
       })
   }
 
   function handleSkipTurn() {
     if (!session) return
+    const optimistic = optimisticSkipTurn(session, queue)
     wakeHeartbeatUi()
+    setPlaybackError(null)
+    setPlayerPromptOpen(false)
+    if (optimistic) {
+      optimisticTrackRef.current = {
+        uri: optimistic.item.uri,
+        until: Date.now() + 12_000,
+      }
+      setSession(optimistic.session)
+      setTrack(trackDetailsFromQueueItem(optimistic.item))
+      setPlayback(playbackFromQueueItem(optimistic.item))
+    }
     void skipTurn(session.id)
       .then((s) => {
         setSession(s)
@@ -255,9 +302,26 @@ export default function WeaveSession() {
         }
         return getPlayback(s.id)
       })
-      .then((p) => { setPlayback(p ? { ...p, observed_at: p.observed_at_ms } : null) })
+      .then((p) => {
+        setPlaybackError(null)
+        setPlayerPromptOpen(false)
+        applyPlaybackResponse(p)
+      })
       .catch((e: unknown) => {
-        setError(e instanceof Error ? e.message : String(e))
+        const message = errorMessage(e)
+        if (isSpotifyPlayerActivationError(message)) {
+          setPlayerPromptOpen(true)
+        } else {
+          setPlaybackError(message)
+        }
+        void getActiveSession().then((s) => {
+          setSession(s)
+          if (s?.id) {
+            void getPlayback(s.id)
+              .then(applyPlaybackResponse)
+              .catch(() => undefined)
+          }
+        }).catch(() => undefined)
       })
   }
 
@@ -273,7 +337,7 @@ export default function WeaveSession() {
       .then((p) => {
         setPlaybackError(null)
         setPlayerPromptOpen(false)
-        setPlayback(p ? { ...p, observed_at: p.observed_at_ms } : null)
+        applyPlaybackResponse(p)
       })
       .catch((e: unknown) => {
         const message = errorMessage(e)
@@ -284,7 +348,7 @@ export default function WeaveSession() {
           setPlaybackError(message)
         }
         void getPlayback(session.id)
-          .then((p) => { setPlayback(p ? { ...p, observed_at: p.observed_at_ms } : null) })
+          .then(applyPlaybackResponse)
           .catch(() => undefined)
       })
   }
@@ -299,7 +363,7 @@ export default function WeaveSession() {
       .then((p) => {
         setPlaybackError(null)
         setPlayerPromptOpen(false)
-        setPlayback(p ? { ...p, observed_at: p.observed_at_ms } : null)
+        applyPlaybackResponse(p)
       })
       .catch((e: unknown) => {
         const message = errorMessage(e)
@@ -309,7 +373,7 @@ export default function WeaveSession() {
           setPlaybackError(message)
         }
         void getPlayback(session.id)
-          .then((p) => { setPlayback(p ? { ...p, observed_at: p.observed_at_ms } : null) })
+          .then(applyPlaybackResponse)
           .catch(() => undefined)
       })
   }
@@ -323,7 +387,7 @@ export default function WeaveSession() {
       .then((p) => {
         setPlaybackError(null)
         setPlayerPromptOpen(false)
-        setPlayback(p ? { ...p, observed_at: p.observed_at_ms } : null)
+        applyPlaybackResponse(p)
       })
       .catch((e: unknown) => {
         const message = errorMessage(e)
@@ -344,7 +408,7 @@ export default function WeaveSession() {
       .then((p) => restartHeartbeat(session.id).then(() => p))
       .then((p) => {
         setPlaybackError(null)
-        setPlayback(p ? { ...p, observed_at: p.observed_at_ms } : null)
+        applyPlaybackResponse(p)
       })
       .catch((e: unknown) => {
         const message = errorMessage(e)
@@ -354,6 +418,27 @@ export default function WeaveSession() {
           setPlaybackError(message)
         }
       })
+  }
+
+  function applyPlaybackResponse(p: PlaybackState | null): void {
+    const observed = p ? { ...p, observed_at: p.observed_at_ms } : null
+    if (shouldAcceptPlayback(observed)) {
+      setPlayback(observed)
+    }
+  }
+
+  function shouldAcceptPlayback(observed: ObservedPlayback | null): boolean {
+    const guard = optimisticTrackRef.current
+    if (!guard) return true
+    if (!observed || Date.now() > guard.until) {
+      optimisticTrackRef.current = null
+      return true
+    }
+    if (observed.track_uri === guard.uri) {
+      optimisticTrackRef.current = null
+      return true
+    }
+    return false
   }
 
   function handleOpenSpotify() {
@@ -1010,6 +1095,61 @@ function applyRemoveOptimistic(queue: QueueState, item: QueueItem): QueueState {
         return { ...candidate, position: candidate.position - 1 }
       }),
     playlists: newPlaylists,
+  }
+}
+
+function optimisticSkipSong(
+  session: Session,
+  queue: QueueState | null,
+): { session: Session; item: QueueItem } | null {
+  const playlist = queue?.playlists.find((pl) => pl.playlist_index === session.current_playlist_index)
+  const item = playlist?.items[0]
+  if (!item) return null
+  return {
+    item,
+    session: {
+      ...session,
+      current_track_uri: item.uri,
+    },
+  }
+}
+
+function optimisticSkipTurn(
+  session: Session,
+  queue: QueueState | null,
+): { session: Session; item: QueueItem } | null {
+  const item = queue?.unified[0]
+  if (!item) return null
+  return {
+    item,
+    session: {
+      ...session,
+      current_playlist_index: item.playlist_index,
+      current_playlist_id: item.playlist_id,
+      current_playlist_name: item.playlist_name,
+      current_track_uri: item.uri,
+    },
+  }
+}
+
+function trackDetailsFromQueueItem(item: QueueItem): TrackDetails {
+  return {
+    name: item.name ?? 'Unknown track',
+    artist: item.artist ?? 'Unknown artist',
+    album_art_url: item.album_art_url,
+    duration_ms: item.duration_ms ?? 0,
+  }
+}
+
+function playbackFromQueueItem(item: QueueItem): ObservedPlayback {
+  const now = Date.now()
+  return {
+    track_uri: item.uri,
+    progress_ms: 0,
+    duration_ms: item.duration_ms ?? 0,
+    is_playing: true,
+    observed_at_ms: now,
+    observed_at: now,
   }
 }
 

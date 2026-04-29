@@ -754,21 +754,30 @@ async fn skip_to_next(
     let user_id = actor.user_id().expect("user actor should have user id");
     let session = get_host_session(&state, session_id, user_id).await?;
     let access_token = get_access_token(&state, session.host_user_id).await?;
-    db::party::refill_queue_from_source(&state.pool, session_id)
+
+    let item = match db::party::first_queue_item(&state.pool, session_id)
         .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let item = if session.mode == db::party::PartyMode::BalancedQueue.as_str() {
-        db::party::pop_next_balanced_queue_item(&state.pool, session_id).await
-    } else {
-        db::party::pop_next_queue_item(&state.pool, session_id).await
-    }
-    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
-    .ok_or_else(|| err(StatusCode::UNPROCESSABLE_ENTITY, "queue is empty"))?;
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
+    {
+        Some(item) => item,
+        None => {
+            db::party::refill_queue_from_source(&state.pool, session_id)
+                .await
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            db::party::first_queue_item(&state.pool, session_id)
+                .await
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
+                .ok_or_else(|| err(StatusCode::UNPROCESSABLE_ENTITY, "queue is empty"))?
+        }
+    };
 
     spotify::player::start_track(&access_token, &item.track.uri)
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
 
+    db::party::remove_queue_item(&state.pool, session_id, item.id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     db::party::set_current_track(&state.pool, session_id, Some(&item.track.uri))
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;

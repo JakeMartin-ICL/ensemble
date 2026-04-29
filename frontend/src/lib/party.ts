@@ -133,13 +133,13 @@ export const getPartyPlayback = (id: string) =>
   get<PartyPlaybackState | null>(`/party/sessions/${id}/playback`)
 
 export const pausePartySession = (id: string) =>
-  post<PlaybackState | null>(`/party/sessions/${id}/pause`, {})
+  post<PartyPlaybackState | null>(`/party/sessions/${id}/pause`, {})
 
 export const resumePartySession = (id: string) =>
-  post<PlaybackState | null>(`/party/sessions/${id}/resume`, {})
+  post<PartyPlaybackState | null>(`/party/sessions/${id}/resume`, {})
 
 export const restartPartySession = (id: string) =>
-  post<PlaybackState | null>(`/party/sessions/${id}/restart`, {})
+  post<PartyPlaybackState | null>(`/party/sessions/${id}/restart`, {})
 
 export const skipPartySession = (id: string) =>
   post<PartySession>(`/party/sessions/${id}/skip`, {})
