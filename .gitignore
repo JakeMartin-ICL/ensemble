@@ -4,6 +4,7 @@ target/
 # Node
 node_modules/
 dist/
+frontend/public/version.json
 
 # Env
 .env

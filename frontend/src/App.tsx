@@ -5,6 +5,7 @@ import WeaveHome from './pages/weave/Setup'
 import WeaveSession from './pages/weave/Session'
 import PartyHome from './pages/party/Setup'
 import PartySession from './pages/party/Session'
+import VersionFooter from './components/VersionFooter'
 
 export default function App() {
   return (
@@ -17,6 +18,7 @@ export default function App() {
         <Route path="/party" element={<PartyHome />} />
         <Route path="/party/session" element={<PartySession />} />
       </Routes>
+      <VersionFooter />
     </BrowserRouter>
   )
 }
