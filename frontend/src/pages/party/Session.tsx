@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { REALTIME_SUBSCRIBE_STATES } from '@supabase/supabase-js'
 import QueueList from '../../components/QueueList'
 import QueueTrackLabel from '../../components/QueueTrackLabel'
 import { supabase } from '../../lib/supabase'
@@ -82,6 +83,7 @@ export default function PartySessionPage() {
   const pendingRemovedIdsRef = useRef<Set<string>>(new Set())
   const optimisticTrackRef = useRef<{ uri: string; until: number } | null>(null)
   const libraryRequestRef = useRef<Promise<void> | null>(null)
+  const lastResyncAtRef = useRef(0)
   const modeButtonRef = useRef<HTMLButtonElement | null>(null)
   const modePanelRef = useRef<HTMLDivElement | null>(null)
   const settingsButtonRef = useRef<HTMLButtonElement | null>(null)
@@ -97,8 +99,12 @@ export default function PartySessionPage() {
 
     void getPartySession(id)
       .then((s) => {
-        setSession(applyDevGuestOverride(s))
-        return getPartyQueue(s.id)
+        const nextSession = applyDevGuestOverride(s)
+        setSession(nextSession)
+        void getPartyPlayback(nextSession.id)
+          .then(applyPlaybackResponse)
+          .catch(() => undefined)
+        return getPartyQueue(nextSession.id)
       })
       .then((q) => { setQueue(filterPendingRemoved(q, pendingRemovedIdsRef.current)) })
       .catch((e: unknown) => {
@@ -111,27 +117,6 @@ export default function PartySessionPage() {
 
     refreshExportPreview(session.id, exportMode)
   }, [session?.id, exportMode])
-
-  useEffect(() => {
-    if (!session?.id) return
-
-    const interval = window.setInterval(() => {
-      void getPartySession(session.id)
-        .then((s) => { setSession(applyDevGuestOverride(s)) })
-        .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
-      void getPartyQueue(session.id)
-        .then((q) => { setQueue(filterPendingRemoved(q, pendingRemovedIdsRef.current)) })
-        .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
-      refreshExportPreview(session.id, exportMode, false)
-      if (sourceQueueOpen) {
-        void getPartySourceQueue(session.id)
-          .then(setSourceQueue)
-          .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
-      }
-    }, 3000)
-
-    return () => { window.clearInterval(interval) }
-  }, [exportMode, session?.id, sourceQueueOpen])
 
   useEffect(() => {
     if (!session?.id) return
@@ -193,11 +178,15 @@ export default function PartySessionPage() {
           table: 'party_sessions',
           filter: `id=eq.${session.id}`,
         },
-        () => {
-          void getPartySession(session.id).then((s) => { setSession(applyDevGuestOverride(s)) })
+        (payload) => {
+          applyPartySessionRealtimeRow(payload.new)
         },
       )
-      .subscribe()
+      .subscribe((status) => {
+        if (status === REALTIME_SUBSCRIBE_STATES.SUBSCRIBED) {
+          resyncPartySession(session.id)
+        }
+      })
 
     return () => { void supabase.removeChannel(channel) }
   }, [exportMode, session?.id, sourceQueueOpen])
@@ -230,28 +219,22 @@ export default function PartySessionPage() {
 
   useEffect(() => {
     if (!session?.id) return
+    const sessionId = session.id
 
-    function refreshPlayback() {
-      if (!session) return
-      void getPartyPlayback(session.id)
-        .then((p) => {
-          if (!shouldAcceptPlayback(p)) return
-          setPlayback((current) => {
-            if (!p) return null
-            // Ignore stale DB snapshots: the heartbeat writes every 10s, but
-            // pause/resume actions update observed_at to Date.now() immediately.
-            // If this snapshot is older than what we already have, keep current.
-            if (current && p.observed_at_ms < current.observed_at) return current
-            return { ...p, observed_at: p.observed_at_ms }
-          })
-        })
-        .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
+    function resyncAfterForeground() {
+      if (document.visibilityState !== 'visible') return
+      resyncPartySession(sessionId)
     }
 
-    refreshPlayback()
-    const interval = window.setInterval(refreshPlayback, 2000)
-    return () => { window.clearInterval(interval) }
-  }, [session?.id])
+    window.addEventListener('focus', resyncAfterForeground)
+    window.addEventListener('pageshow', resyncAfterForeground)
+    document.addEventListener('visibilitychange', resyncAfterForeground)
+    return () => {
+      window.removeEventListener('focus', resyncAfterForeground)
+      window.removeEventListener('pageshow', resyncAfterForeground)
+      document.removeEventListener('visibilitychange', resyncAfterForeground)
+    }
+  }, [exportMode, session?.id, sourceQueueOpen])
 
   useEffect(() => {
     const uri = playback?.track_uri ?? session?.current_track_uri
@@ -420,6 +403,46 @@ export default function PartySessionPage() {
         refreshQueue()
         setError(e instanceof Error ? e.message : String(e))
       })
+  }
+
+  function resyncPartySession(id = session?.id) {
+    if (!id) return
+    const nowMs = Date.now()
+    if (nowMs - lastResyncAtRef.current < 1_000) return
+    lastResyncAtRef.current = nowMs
+
+    void getPartySession(id)
+      .then((s) => {
+        const nextSession = applyDevGuestOverride(s)
+        setSession(nextSession)
+        return getPartyPlayback(nextSession.id)
+      })
+      .then(applyPlaybackResponse)
+      .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
+    refreshQueue(id)
+    refreshExportPreview(id, exportMode, false)
+    refreshSourceQueue(id)
+  }
+
+  function applyPlaybackResponse(p: { track_uri: string; progress_ms: number; duration_ms: number; is_playing: boolean; observed_at_ms: number } | null): void {
+    if (!shouldAcceptPlayback(p)) return
+    setPlayback((current) => {
+      if (!p) return null
+      if (current && p.observed_at_ms < current.observed_at) return current
+      return { ...p, observed_at: p.observed_at_ms }
+    })
+  }
+
+  function applyPartySessionRealtimeRow(row: unknown): void {
+    if (!isRecord(row)) return
+    if (row.is_active === false) {
+      localStorage.removeItem(PARTY_SESSION_KEY)
+      void navigate('/party')
+      return
+    }
+
+    setSession((current) => mergePartySessionRealtimeRow(current, row))
+    applyPlaybackResponse(playbackFromPartySessionRealtimeRow(row))
   }
 
   function handlePlayPause() {
@@ -914,6 +937,71 @@ function applyDevGuestOverride(session: PartySession): PartySession {
   return localStorage.getItem(PARTY_GUEST_SESSION_KEY) === session.id
     ? { ...session, is_host: false }
     : session
+}
+
+function mergePartySessionRealtimeRow(session: PartySession | null, row: Record<string, unknown>): PartySession | null {
+  if (!session || row.id !== session.id) return session
+  const sourceMinQueueSize = numericRealtimeValue(row.source_min_queue_size)
+  return {
+    ...session,
+    mode: isPartyMode(row.mode) ? row.mode : session.mode,
+    allow_guest_playlist_adds: typeof row.allow_guest_playlist_adds === 'boolean'
+      ? row.allow_guest_playlist_adds
+      : session.allow_guest_playlist_adds,
+    source_min_queue_size: sourceMinQueueSize ?? session.source_min_queue_size,
+    add_added_tracks_to_source: typeof row.add_added_tracks_to_source === 'boolean'
+      ? row.add_added_tracks_to_source
+      : session.add_added_tracks_to_source,
+    show_queue_attribution: typeof row.show_queue_attribution === 'boolean'
+      ? row.show_queue_attribution
+      : session.show_queue_attribution,
+    current_track_uri: typeof row.current_track_uri === 'string' ? row.current_track_uri : null,
+  }
+}
+
+function playbackFromPartySessionRealtimeRow(row: Record<string, unknown>): ObservedPlayback | null {
+  const progressMs = numericRealtimeValue(row.playback_progress_ms)
+  const durationMs = numericRealtimeValue(row.playback_duration_ms)
+  if (
+    typeof row.playback_track_uri !== 'string'
+    || progressMs === null
+    || durationMs === null
+    || typeof row.playback_is_playing !== 'boolean'
+    || typeof row.playback_updated_at !== 'string'
+  ) {
+    return null
+  }
+
+  const observedAt = Date.parse(row.playback_updated_at)
+  if (Number.isNaN(observedAt)) return null
+  return {
+    track_uri: row.playback_track_uri,
+    progress_ms: progressMs,
+    duration_ms: durationMs,
+    is_playing: row.playback_is_playing,
+    observed_at_ms: observedAt,
+    observed_at: observedAt,
+  }
+}
+
+function isPartyMode(value: unknown): value is PartyMode {
+  return value === 'open_queue'
+    || value === 'shared_queue'
+    || value === 'voted_queue'
+    || value === 'balanced_queue'
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+function numericRealtimeValue(value: unknown): number | null {
+  if (typeof value === 'number') return value
+  if (typeof value === 'string') {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
 }
 
 function exportPlaylistName() {

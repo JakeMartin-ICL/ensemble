@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { REALTIME_SUBSCRIBE_STATES } from '@supabase/supabase-js'
 import QueueList from '../../components/QueueList'
 import QueueTrackLabel from '../../components/QueueTrackLabel'
 import { supabase } from '../../lib/supabase'
@@ -75,6 +76,11 @@ export default function WeaveSession() {
         return
       }
       setSession(s)
+      void getPlayback(s.id)
+        .then(applyPlaybackResponse)
+        .catch((e: unknown) => {
+          setPlaybackError(errorMessage(e))
+        })
     }).catch((e: unknown) => {
       setError(e instanceof Error ? e.message : String(e))
     })
@@ -85,49 +91,6 @@ export default function WeaveSession() {
     lastPausedObservedAtRef.current = null
     setHeartbeatIdle(false)
   }, [session?.id])
-
-  useEffect(() => {
-    if (!session?.id) return
-    if (heartbeatIdle) return
-    const sessionId = session.id
-    let timerId = 0
-
-    function poll() {
-      void getPlayback(sessionId).then((p) => {
-        const observed = p ? { ...p, observed_at: p.observed_at_ms } : null
-        if (!shouldAcceptPlayback(observed)) {
-          timerId = window.setTimeout(poll, 1_000)
-          return
-        }
-        setPlayback((current) => {
-          if (!observed) return null
-          if (current && observed.observed_at < current.observed_at) return current
-          return observed
-        })
-        if (observed?.is_playing) {
-          pausedObservationCountRef.current = 0
-          lastPausedObservedAtRef.current = null
-        } else if (observed && observed.observed_at !== lastPausedObservedAtRef.current) {
-          pausedObservationCountRef.current += 1
-          lastPausedObservedAtRef.current = observed.observed_at
-        }
-        if (pausedObservationCountRef.current >= 3) {
-          setHeartbeatIdle(true)
-          return
-        }
-        const remaining = observed?.is_playing
-          ? observed.duration_ms - currentProgress(observed, Date.now())
-          : Infinity
-        timerId = window.setTimeout(poll, remaining <= 10_000 ? 1_000 : 10_000)
-      }).catch((e: unknown) => {
-        setPlaybackError(errorMessage(e))
-        timerId = window.setTimeout(poll, 10_000)
-      })
-    }
-
-    poll()
-    return () => { window.clearTimeout(timerId) }
-  }, [heartbeatIdle, session?.id])
 
   useEffect(() => {
     if (!session?.id || !queueOpen) return
@@ -217,6 +180,7 @@ export default function WeaveSession() {
           const nextSession = sessionFromRealtimeRow(payload.new)
           if (nextSession) {
             setSession(nextSession)
+            applyPlaybackResponse(playbackFromRealtimeRow(payload.new))
             if (queueOpen) {
               void getQueue(nextSession.id).then(setQueue).catch((e: unknown) => {
                 setError(e instanceof Error ? e.message : String(e))
@@ -225,7 +189,25 @@ export default function WeaveSession() {
           }
         },
       )
-      .subscribe()
+      .subscribe((status) => {
+        if (status === REALTIME_SUBSCRIBE_STATES.SUBSCRIBED) {
+          void getActiveSession().then((s) => {
+            if (!s) {
+              void navigate('/weave')
+              return
+            }
+            setSession(s)
+            void getPlayback(s.id).then(applyPlaybackResponse).catch(() => undefined)
+            if (queueOpen) {
+              void getQueue(s.id).then(setQueue).catch((e: unknown) => {
+                setError(e instanceof Error ? e.message : String(e))
+              })
+            }
+          }).catch((e: unknown) => {
+            setError(e instanceof Error ? e.message : String(e))
+          })
+        }
+      })
     return () => { void supabase.removeChannel(channel) }
   }, [navigate, queueOpen, session?.id])
 
@@ -423,7 +405,11 @@ export default function WeaveSession() {
   function applyPlaybackResponse(p: PlaybackState | null): void {
     const observed = p ? { ...p, observed_at: p.observed_at_ms } : null
     if (shouldAcceptPlayback(observed)) {
-      setPlayback(observed)
+      setPlayback((current) => {
+        if (!observed) return null
+        if (current && observed.observed_at < current.observed_at) return current
+        return observed
+      })
     }
   }
 
@@ -706,6 +692,40 @@ function sessionFromRealtimeRow(row: unknown): Session | null {
     current_playlist_name: current?.name ?? '',
     current_track_uri: currentTrackUri,
   }
+}
+
+function playbackFromRealtimeRow(row: unknown): PlaybackState | null {
+  if (!isRecord(row)) return null
+  const progressMs = numericRealtimeValue(row.playback_progress_ms)
+  const durationMs = numericRealtimeValue(row.playback_duration_ms)
+  if (
+    typeof row.playback_track_uri !== 'string'
+    || progressMs === null
+    || durationMs === null
+    || typeof row.playback_is_playing !== 'boolean'
+    || typeof row.playback_updated_at !== 'string'
+  ) {
+    return null
+  }
+
+  const observedAt = Date.parse(row.playback_updated_at)
+  if (Number.isNaN(observedAt)) return null
+  return {
+    track_uri: row.playback_track_uri,
+    progress_ms: progressMs,
+    duration_ms: durationMs,
+    is_playing: row.playback_is_playing,
+    observed_at_ms: observedAt,
+  }
+}
+
+function numericRealtimeValue(value: unknown): number | null {
+  if (typeof value === 'number') return value
+  if (typeof value === 'string') {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
 }
 
 function isInactiveRealtimeRow(row: unknown): boolean {
