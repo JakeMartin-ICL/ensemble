@@ -42,6 +42,10 @@ pub fn router() -> Router<AppState> {
             "/sessions/{id}/queue/{playlist_index}/reorder",
             post(reorder_playlist_queue),
         )
+        .route(
+            "/sessions/{id}/queue/{playlist_index}/remove",
+            post(remove_playlist_queue_track),
+        )
         .route("/sessions/{id}/end", post(end_session))
         .route("/playlists", get(get_playlists))
         .route("/track/{uri}", get(get_track))
@@ -108,6 +112,11 @@ struct PlaylistQueueResponse {
 struct ReorderQueueBody {
     from_position: usize,
     to_position: usize,
+}
+
+#[derive(serde::Deserialize)]
+struct RemoveQueueBody {
+    position: usize,
 }
 
 #[derive(serde::Deserialize)]
@@ -715,6 +724,71 @@ async fn reorder_playlist_queue(
     db::weave::update_playlists(&state.pool, session_id, &session.playlists.0)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let updated = db::weave::get_session(&state.pool, session_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "session not found"))?;
+
+    Ok(Json(build_queue_response(&updated)))
+}
+
+async fn remove_playlist_queue_track(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((session_id, playlist_index)): Path<(Uuid, usize)>,
+    Json(body): Json<RemoveQueueBody>,
+) -> ApiResult<QueueResponse> {
+    let user_id = crate::routes::session::cached_user_id_from_headers(&state, &headers).await?;
+    let mut session = get_verified_session(&state, session_id, user_id).await?;
+
+    if session.playlist_track_indexes.len() < session.playlists.0.len() {
+        session
+            .playlist_track_indexes
+            .resize(session.playlists.0.len(), 0);
+    }
+
+    let Some(playlist) = session.playlists.0.get_mut(playlist_index) else {
+        return Err(err(StatusCode::NOT_FOUND, "playlist not found"));
+    };
+
+    let current_index = session
+        .playlist_track_indexes
+        .get(playlist_index)
+        .copied()
+        .unwrap_or(0);
+    let current_abs = usize::try_from(current_index)
+        .ok()
+        .filter(|index| *index < playlist.order.len())
+        .unwrap_or(0);
+    let positions = queue_positions(playlist.order.len(), current_index);
+
+    let Some(remove_abs) = positions.get(body.position).copied() else {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid queue position"));
+    };
+
+    let removed = playlist.order.remove(remove_abs);
+    let adjusted_current = if remove_abs < current_abs {
+        current_abs.saturating_sub(1)
+    } else {
+        current_abs.min(playlist.order.len().saturating_sub(1))
+    };
+    session.playlist_track_indexes[playlist_index] = adjusted_current as i32;
+
+    let queued_track_uri = session
+        .queued_track_uri
+        .as_deref()
+        .filter(|uri| *uri != removed.uri);
+
+    db::weave::update_playlists_track_indexes_and_queue(
+        &state.pool,
+        session_id,
+        &session.playlists.0,
+        &session.playlist_track_indexes,
+        queued_track_uri,
+    )
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let updated = db::weave::get_session(&state.pool, session_id)
         .await

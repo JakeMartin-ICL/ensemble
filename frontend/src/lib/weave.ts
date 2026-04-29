@@ -138,6 +138,16 @@ export const reorderPlaylistQueue = (
     { from_position, to_position },
   )
 
+export const removePlaylistQueueTrack = (
+  id: string,
+  playlist_index: number,
+  position: number,
+) =>
+  post<QueueState>(
+    `/weave/sessions/${id}/queue/${playlist_index.toString()}/remove`,
+    { position },
+  )
+
 export const endSession = (id: string) =>
   post<{ ok: boolean }>(`/weave/sessions/${id}/end`, {})
 

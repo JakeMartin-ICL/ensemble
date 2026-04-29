@@ -19,6 +19,7 @@ import {
   pauseSession,
   restartSession,
   restartHeartbeat,
+  removePlaylistQueueTrack,
   reorderPlaylistQueue,
   resumeSession,
   searchQueueTracks,
@@ -324,6 +325,14 @@ export default function WeaveSession() {
       .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
   }
 
+  function handleRemoveQueueTrack(item: QueueItem) {
+    if (!session) return
+    setQueue((prev) => prev ? applyRemoveOptimistic(prev, item) : prev)
+    void removePlaylistQueueTrack(session.id, item.playlist_index, item.position)
+      .then(setQueue)
+      .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
+  }
+
   function handleAddQueueTrack(playlistIndex: number, item: TrackSearchResult) {
     if (!session) return Promise.resolve()
     return addQueueTrack(session.id, playlistIndex, item)
@@ -455,6 +464,7 @@ export default function WeaveSession() {
           queue={queue}
           onAddTrack={handleAddQueueTrack}
           onReorder={handleReorderQueue}
+          onRemove={handleRemoveQueueTrack}
           playlistColors={playlistColors}
         />
       )}
@@ -614,12 +624,14 @@ function QueuePanel({
   queue,
   onAddTrack,
   onReorder,
+  onRemove,
   playlistColors,
 }: {
   sessionId: string
   queue: QueueState
   onAddTrack: (playlistIndex: number, item: TrackSearchResult) => Promise<void>
   onReorder: (item: QueueItem, toPosition: number) => void
+  onRemove: (item: QueueItem) => void
   playlistColors: Map<string, string>
 }) {
   const [activeTab, setActiveTab] = useState<string>('unified')
@@ -857,6 +869,8 @@ function QueuePanel({
           renderItem={(item) => <QueueTrackLabel item={item} />}
           reorderScope="group"
           onTopDrop={(item) => { onReorder(item, 0) }}
+          onRemoveDrop={onRemove}
+          removeDropLabel="Skip"
         />
       ) : activePlaylist ? (
         <QueueList
@@ -866,6 +880,8 @@ function QueuePanel({
           getColor={(item) => playlistColors.get(item.playlist_id) ?? '#c084fc'}
           renderItem={(item) => <QueueTrackLabel item={item} />}
           onTopDrop={(item) => { onReorder(item, 0) }}
+          onRemoveDrop={onRemove}
+          removeDropLabel="Skip"
         />
       ) : null}
     </section>
@@ -893,6 +909,32 @@ function applyReorderOptimistic(queue: QueueState, item: QueueItem, toPosition: 
   })
 
   return { unified: newUnified, playlists: newPlaylists }
+}
+
+function applyRemoveOptimistic(queue: QueueState, item: QueueItem): QueueState {
+  const newPlaylists = queue.playlists.map((pl) => {
+    if (pl.playlist_index !== item.playlist_index) return pl
+    return {
+      ...pl,
+      items: pl.items
+        .filter((candidate) => candidate.position !== item.position)
+        .map((candidate, position) => ({ ...candidate, position })),
+    }
+  })
+
+  return {
+    unified: queue.unified
+      .filter((candidate) => (
+        candidate.playlist_index !== item.playlist_index || candidate.position !== item.position
+      ))
+      .map((candidate) => {
+        if (candidate.playlist_index !== item.playlist_index || candidate.position < item.position) {
+          return candidate
+        }
+        return { ...candidate, position: candidate.position - 1 }
+      }),
+    playlists: newPlaylists,
+  }
 }
 
 function SkipTurnIcon() {
