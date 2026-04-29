@@ -55,8 +55,14 @@ pub fn router() -> Router<AppState> {
         .route("/sessions/{id}/queue/reorder", post(reorder_queue))
         .route("/sessions/{id}/queue/remove", post(remove_queue_track))
         .route("/sessions/{id}/queue/{item_id}/vote", post(vote_queue_item))
-        .route("/sessions/{id}/queue/{item_id}/vote", delete(unvote_queue_item))
-        .route("/sessions/{id}/queue/{item_id}/pin", delete(unpin_queue_item))
+        .route(
+            "/sessions/{id}/queue/{item_id}/vote",
+            delete(unvote_queue_item),
+        )
+        .route(
+            "/sessions/{id}/queue/{item_id}/pin",
+            delete(unpin_queue_item),
+        )
         .route("/sessions/{id}/export", get(get_export_preview))
         .route("/sessions/{id}/export/playlist", post(export_playlist))
         .route("/sessions/{id}/export/csv", get(export_csv))
@@ -329,8 +335,15 @@ impl From<spotify::player::PlaybackState> for PlaybackResponse {
 
 #[derive(Clone)]
 enum PartyActor {
-    User { id: Uuid, display_name: String },
-    Guest { id: Uuid, session_id: Uuid, display_name: String },
+    User {
+        id: Uuid,
+        display_name: String,
+    },
+    Guest {
+        id: Uuid,
+        session_id: Uuid,
+        display_name: String,
+    },
 }
 
 impl PartyActor {
@@ -459,14 +472,20 @@ async fn get_access_token(
             )
         })?;
         let tokens = spotify::auth::refresh_token_pkce(&user.refresh_token, client_id)
-        .await
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
+            .await
+            .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
 
         let new_expires_at =
             chrono::Utc::now() + chrono::Duration::seconds(tokens.expires_in as i64);
-        db::users::update_tokens(&state.pool, user_id, &tokens.access_token, new_expires_at)
-            .await
-            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        db::users::update_tokens(
+            &state.pool,
+            user_id,
+            &tokens.access_token,
+            tokens.refresh_token.as_deref(),
+            new_expires_at,
+        )
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
         Ok(tokens.access_token)
     } else {
@@ -563,7 +582,11 @@ async fn join_session(
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .ok_or_else(|| err(StatusCode::BAD_REQUEST, "guest display name is required"))?;
-    let session_token = format!("ens_guest_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    let session_token = format!(
+        "ens_guest_{}{}",
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple()
+    );
     let expires_at = Utc::now() + chrono::Duration::days(1);
     let guest = db::party::create_guest_session(
         &state.pool,
@@ -643,8 +666,15 @@ async fn pause_session(
 
     if let Some(ref p) = playback {
         if let Err(e) = db::party::update_playback_state(
-            &state.pool, session_id, &p.track_uri, p.progress_ms as i64, p.duration_ms as i64, p.is_playing,
-        ).await {
+            &state.pool,
+            session_id,
+            &p.track_uri,
+            p.progress_ms as i64,
+            p.duration_ms as i64,
+            p.is_playing,
+        )
+        .await
+        {
             tracing::warn!("failed to cache playback state after pause: {e:#}");
         }
     }
@@ -674,8 +704,15 @@ async fn resume_session(
 
     if let Some(ref p) = playback {
         if let Err(e) = db::party::update_playback_state(
-            &state.pool, session_id, &p.track_uri, p.progress_ms as i64, p.duration_ms as i64, p.is_playing,
-        ).await {
+            &state.pool,
+            session_id,
+            &p.track_uri,
+            p.progress_ms as i64,
+            p.duration_ms as i64,
+            p.is_playing,
+        )
+        .await
+        {
             tracing::warn!("failed to cache playback state after resume: {e:#}");
         }
     }
@@ -705,8 +742,15 @@ async fn restart_session(
 
     if let Some(ref p) = playback {
         if let Err(e) = db::party::update_playback_state(
-            &state.pool, session_id, &p.track_uri, p.progress_ms as i64, p.duration_ms as i64, p.is_playing,
-        ).await {
+            &state.pool,
+            session_id,
+            &p.track_uri,
+            p.progress_ms as i64,
+            p.duration_ms as i64,
+            p.is_playing,
+        )
+        .await
+        {
             tracing::warn!("failed to cache playback state after restart: {e:#}");
         }
     }
@@ -770,7 +814,9 @@ async fn get_queue(
     db::party::refill_queue_from_source(&state.pool, session_id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(build_queue_response(&state, session_id, &actor).await?))
+    Ok(Json(
+        build_queue_response(&state, session_id, &actor).await?,
+    ))
 }
 
 async fn update_mode(
@@ -953,20 +999,28 @@ async fn add_queue_track(
             actor.user_id(),
             actor.guest_id(),
         )
-            .await
-            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
 
     if session.mode == db::party::PartyMode::VotedQueue.as_str() {
-        db::party::vote_queue_item(&state.pool, session_id, item.id, actor.user_id(), actor.guest_id())
-            .await
-            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        db::party::vote_queue_item(
+            &state.pool,
+            session_id,
+            item.id,
+            actor.user_id(),
+            actor.guest_id(),
+        )
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
         db::party::sort_voted_queue(&state.pool, session_id)
             .await
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
 
-    Ok(Json(build_queue_response(&state, session_id, &actor).await?))
+    Ok(Json(
+        build_queue_response(&state, session_id, &actor).await?,
+    ))
 }
 
 async fn add_queue_playlist(
@@ -1012,7 +1066,9 @@ async fn add_queue_playlist(
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    Ok(Json(build_queue_response(&state, session_id, &actor).await?))
+    Ok(Json(
+        build_queue_response(&state, session_id, &actor).await?,
+    ))
 }
 
 async fn get_source_queue(
@@ -1084,7 +1140,9 @@ async fn reorder_queue(
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
 
-    Ok(Json(build_queue_response(&state, session_id, &actor).await?))
+    Ok(Json(
+        build_queue_response(&state, session_id, &actor).await?,
+    ))
 }
 
 async fn remove_queue_track(
@@ -1109,7 +1167,9 @@ async fn remove_queue_track(
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
 
-    Ok(Json(build_queue_response(&state, session_id, &actor).await?))
+    Ok(Json(
+        build_queue_response(&state, session_id, &actor).await?,
+    ))
 }
 
 async fn vote_queue_item(
@@ -1125,20 +1185,34 @@ async fn vote_queue_item(
     }
 
     if body.vote {
-        db::party::vote_queue_item(&state.pool, session_id, item_id, actor.user_id(), actor.guest_id())
-            .await
-            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        db::party::vote_queue_item(
+            &state.pool,
+            session_id,
+            item_id,
+            actor.user_id(),
+            actor.guest_id(),
+        )
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     } else {
-        db::party::unvote_queue_item(&state.pool, session_id, item_id, actor.user_id(), actor.guest_id())
-            .await
-            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        db::party::unvote_queue_item(
+            &state.pool,
+            session_id,
+            item_id,
+            actor.user_id(),
+            actor.guest_id(),
+        )
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
 
     db::party::sort_voted_queue(&state.pool, session_id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    Ok(Json(build_queue_response(&state, session_id, &actor).await?))
+    Ok(Json(
+        build_queue_response(&state, session_id, &actor).await?,
+    ))
 }
 
 async fn unvote_queue_item(
@@ -1152,14 +1226,22 @@ async fn unvote_queue_item(
         return Err(err(StatusCode::FORBIDDEN, "not your party session"));
     }
 
-    db::party::unvote_queue_item(&state.pool, session_id, item_id, actor.user_id(), actor.guest_id())
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    db::party::unvote_queue_item(
+        &state.pool,
+        session_id,
+        item_id,
+        actor.user_id(),
+        actor.guest_id(),
+    )
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     db::party::sort_voted_queue(&state.pool, session_id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    Ok(Json(build_queue_response(&state, session_id, &actor).await?))
+    Ok(Json(
+        build_queue_response(&state, session_id, &actor).await?,
+    ))
 }
 
 async fn unpin_queue_item(
@@ -1184,7 +1266,9 @@ async fn unpin_queue_item(
         id: user_id,
         display_name: String::new(),
     };
-    Ok(Json(build_queue_response(&state, session_id, &actor).await?))
+    Ok(Json(
+        build_queue_response(&state, session_id, &actor).await?,
+    ))
 }
 
 async fn get_export_preview(
@@ -1219,7 +1303,10 @@ async fn export_playlist(
         .expect("user actor should have user id");
     let session = get_existing_session(&state, session_id).await?;
     if session.host_user_id != user_id {
-        return Err(err(StatusCode::FORBIDDEN, "Spotify export requires a signed-in host"));
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "Spotify export requires a signed-in host",
+        ));
     }
     let mode = normalize_export_mode(body.mode.as_deref());
     let items = build_export_items(&state, session_id, mode).await?;
@@ -1376,14 +1463,17 @@ async fn build_queue_response(
 
     let mut vote_map: HashMap<Uuid, Vec<VoterResponse>> = HashMap::new();
     for vote in raw_votes {
-        vote_map.entry(vote.queue_item_id).or_default().push(VoterResponse {
-            user_id: vote
-                .user_id
-                .or(vote.guest_id)
-                .map(|id| id.to_string())
-                .unwrap_or_default(),
-            display_name: vote.display_name,
-        });
+        vote_map
+            .entry(vote.queue_item_id)
+            .or_default()
+            .push(VoterResponse {
+                user_id: vote
+                    .user_id
+                    .or(vote.guest_id)
+                    .map(|id| id.to_string())
+                    .unwrap_or_default(),
+                display_name: vote.display_name,
+            });
     }
 
     let items = items

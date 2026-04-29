@@ -180,6 +180,13 @@ async fn maybe_refresh_token(
         .ok_or_else(|| anyhow::anyhow!("Spotify client ID is missing; reconnect Spotify"))?;
     let tokens = spotify::auth::refresh_token_pkce(&user.refresh_token, client_id).await?;
     let new_expires_at = chrono::Utc::now() + chrono::Duration::seconds(tokens.expires_in as i64);
-    db::users::update_tokens(pool, user_id, &tokens.access_token, new_expires_at).await?;
+    db::users::update_tokens(
+        pool,
+        user_id,
+        &tokens.access_token,
+        tokens.refresh_token.as_deref(),
+        new_expires_at,
+    )
+    .await?;
     Ok(tokens.access_token)
 }

@@ -50,13 +50,19 @@ pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<
             )
         })?;
         let tokens = spotify::auth::refresh_token_pkce(&user.refresh_token, client_id)
-        .await
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
+            .await
+            .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
 
         let new_expires_at = Utc::now() + chrono::Duration::seconds(tokens.expires_in as i64);
-        db::users::update_tokens(&state.pool, user_id, &tokens.access_token, new_expires_at)
-            .await
-            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        db::users::update_tokens(
+            &state.pool,
+            user_id,
+            &tokens.access_token,
+            tokens.refresh_token.as_deref(),
+            new_expires_at,
+        )
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
         tokens.access_token
     } else {

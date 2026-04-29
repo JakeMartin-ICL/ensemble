@@ -284,6 +284,7 @@ pub async fn deactivate_user_sessions(pool: &PgPool, host_user_id: Uuid) -> anyh
     Ok(())
 }
 
+
 pub async fn end_session(pool: &PgPool, session_id: Uuid) -> anyhow::Result<()> {
     sqlx::query(
         r#"
@@ -1366,4 +1367,3 @@ pub async fn update_playback_state(
     .context("updating party playback state")?;
     Ok(())
 }
-

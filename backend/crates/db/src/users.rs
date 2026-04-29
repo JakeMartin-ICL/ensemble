@@ -74,16 +74,21 @@ pub async fn update_tokens(
     pool: &PgPool,
     id: Uuid,
     access_token: &str,
+    refresh_token: Option<&str>,
     token_expires_at: DateTime<Utc>,
 ) -> anyhow::Result<()> {
     sqlx::query(
         r#"
         UPDATE public.users
-        SET access_token = $1, token_expires_at = $2, updated_at = now()
-        WHERE id = $3
+        SET access_token = $1,
+            refresh_token = COALESCE($2, refresh_token),
+            token_expires_at = $3,
+            updated_at = now()
+        WHERE id = $4
         "#,
     )
     .bind(access_token)
+    .bind(refresh_token)
     .bind(token_expires_at)
     .bind(id)
     .execute(pool)

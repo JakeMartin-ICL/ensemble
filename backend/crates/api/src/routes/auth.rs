@@ -49,7 +49,10 @@ async fn callback(
 ) -> ApiResult<CallbackResponse> {
     let client_id = body.client_id.trim();
     if client_id.is_empty() {
-        return Err(err(StatusCode::BAD_REQUEST, "Spotify client ID is required"));
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "Spotify client ID is required",
+        ));
     }
 
     let tokens = spotify::auth::exchange_code_pkce(
@@ -119,18 +122,21 @@ async fn refresh(State(state): State<AppState>, headers: HeaderMap) -> ApiResult
             "Spotify client ID is missing; reconnect Spotify",
         )
     })?;
-    let tokens = spotify::auth::refresh_token_pkce(
-        &user.refresh_token,
-        client_id,
-    )
-    .await
-    .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
+    let tokens = spotify::auth::refresh_token_pkce(&user.refresh_token, client_id)
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
 
     let token_expires_at = Utc::now() + chrono::Duration::seconds(tokens.expires_in as i64);
 
-    db::users::update_tokens(&state.pool, user_id, &tokens.access_token, token_expires_at)
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    db::users::update_tokens(
+        &state.pool,
+        user_id,
+        &tokens.access_token,
+        tokens.refresh_token.as_deref(),
+        token_expires_at,
+    )
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     Ok(Json(RefreshResponse {
         access_token: tokens.access_token,

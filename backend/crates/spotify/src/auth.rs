@@ -1,6 +1,6 @@
 //! OAuth 2.0 token exchange and refresh.
 
-use anyhow::Context;
+use anyhow::{bail, Context};
 
 pub struct TokenResponse {
     pub access_token: String,
@@ -26,15 +26,15 @@ pub async fn exchange_code(
         ("code", code),
         ("redirect_uri", redirect_uri),
     ];
-    let raw = reqwest::Client::new()
+    let response = reqwest::Client::new()
         .post("https://accounts.spotify.com/api/token")
         .basic_auth(client_id, Some(client_secret))
         .form(&params)
         .send()
         .await
-        .context("sending token request")?
-        .error_for_status()
-        .context("Spotify token endpoint returned error")?
+        .context("sending token request")?;
+    let raw = parse_token_response(response, "token")
+        .await?
         .json::<RawTokenResponse>()
         .await
         .context("parsing token response")?;
@@ -58,14 +58,14 @@ pub async fn exchange_code_pkce(
         ("client_id", client_id),
         ("code_verifier", code_verifier),
     ];
-    let raw = reqwest::Client::new()
+    let response = reqwest::Client::new()
         .post("https://accounts.spotify.com/api/token")
         .form(&params)
         .send()
         .await
-        .context("sending PKCE token request")?
-        .error_for_status()
-        .context("Spotify token endpoint returned error")?
+        .context("sending PKCE token request")?;
+    let raw = parse_token_response(response, "PKCE token")
+        .await?
         .json::<RawTokenResponse>()
         .await
         .context("parsing PKCE token response")?;
@@ -85,15 +85,15 @@ pub async fn refresh_token(
         ("grant_type", "refresh_token"),
         ("refresh_token", refresh_token),
     ];
-    let raw = reqwest::Client::new()
+    let response = reqwest::Client::new()
         .post("https://accounts.spotify.com/api/token")
         .basic_auth(client_id, Some(client_secret))
         .form(&params)
         .send()
         .await
-        .context("sending refresh request")?
-        .error_for_status()
-        .context("Spotify token endpoint returned error")?
+        .context("sending refresh request")?;
+    let raw = parse_token_response(response, "refresh")
+        .await?
         .json::<RawTokenResponse>()
         .await
         .context("parsing refresh response")?;
@@ -113,14 +113,14 @@ pub async fn refresh_token_pkce(
         ("refresh_token", refresh_token),
         ("client_id", client_id),
     ];
-    let raw = reqwest::Client::new()
+    let response = reqwest::Client::new()
         .post("https://accounts.spotify.com/api/token")
         .form(&params)
         .send()
         .await
-        .context("sending PKCE refresh request")?
-        .error_for_status()
-        .context("Spotify token endpoint returned error")?
+        .context("sending PKCE refresh request")?;
+    let raw = parse_token_response(response, "PKCE refresh")
+        .await?
         .json::<RawTokenResponse>()
         .await
         .context("parsing PKCE refresh response")?;
@@ -129,4 +129,20 @@ pub async fn refresh_token_pkce(
         refresh_token: raw.refresh_token,
         expires_in: raw.expires_in,
     })
+}
+
+async fn parse_token_response(
+    response: reqwest::Response,
+    request_kind: &str,
+) -> anyhow::Result<reqwest::Response> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+
+    let body = response
+        .text()
+        .await
+        .unwrap_or_else(|e| format!("<failed to read response body: {e}>"));
+    bail!("Spotify {request_kind} endpoint returned {status}: {body}");
 }

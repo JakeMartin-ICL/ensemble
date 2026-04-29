@@ -203,14 +203,20 @@ async fn get_access_token(
             )
         })?;
         let tokens = spotify::auth::refresh_token_pkce(&user.refresh_token, client_id)
-        .await
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
+            .await
+            .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
 
         let new_expires_at =
             chrono::Utc::now() + chrono::Duration::seconds(tokens.expires_in as i64);
-        db::users::update_tokens(&state.pool, user_id, &tokens.access_token, new_expires_at)
-            .await
-            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        db::users::update_tokens(
+            &state.pool,
+            user_id,
+            &tokens.access_token,
+            tokens.refresh_token.as_deref(),
+            new_expires_at,
+        )
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
         Ok(tokens.access_token)
     } else {
