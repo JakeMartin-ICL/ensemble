@@ -504,11 +504,24 @@ async fn restart_heartbeat(
 ) -> ApiResult<Option<PlaybackResponse>> {
     let user_id = crate::routes::session::cached_user_id_from_headers(&state, &headers).await?;
     let session = get_verified_session(&state, session_id, user_id).await?;
+    let access_token = get_access_token(&state, user_id).await?;
+
+    let playback = spotify::player::get_playback_state(&access_token)
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?
+        .ok_or_else(|| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                "Spotify has no active playback. Open Spotify on your phone, desktop app, or web player and start playing anything, then try again.",
+            )
+        })?;
+
+    cache_playback(&state, session_id, Some(&playback), "heartbeat restart").await;
     stop_heartbeat(&state, session_id);
     if session.is_active {
         spawn_heartbeat(&state, session_id);
     }
-    Ok(Json(playback_from_session(&session)))
+    Ok(Json(Some(playback.into())))
 }
 
 async fn pause_session(

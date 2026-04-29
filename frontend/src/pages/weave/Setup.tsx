@@ -229,6 +229,9 @@ function SetupForm({ onStart }: { onStart: () => void }) {
 
 function isMissingSpotifyPlayer(message: string): boolean {
   return message.includes('Spotify has no available playback device')
+    || message.includes('Spotify has no active playback')
     || message.includes('Spotify found a playback device but did not provide a controllable device id')
     || message.includes('Spotify rejected the play command')
+    || message.includes('Player command failed')
+    || message.includes('No active device')
 }

@@ -299,6 +299,27 @@ export default function WeaveSession() {
       })
   }
 
+  function handleRetryPlayerActivation() {
+    if (!session) return
+    wakeHeartbeatUi()
+    setPlaybackError(null)
+    setPlayerPromptOpen(false)
+    void resumeSession(session.id)
+      .then((p) => restartHeartbeat(session.id).then(() => p))
+      .then((p) => {
+        setPlaybackError(null)
+        setPlayback(p ? { ...p, observed_at: p.observed_at_ms } : null)
+      })
+      .catch((e: unknown) => {
+        const message = errorMessage(e)
+        if (isSpotifyPlayerActivationError(message)) {
+          setPlayerPromptOpen(true)
+        } else {
+          setPlaybackError(message)
+        }
+      })
+  }
+
   function wakeHeartbeatUi(ignorePausedObservedAt: number | null = null) {
     pausedObservationCountRef.current = 0
     lastPausedObservedAtRef.current = ignorePausedObservedAt
@@ -498,7 +519,7 @@ export default function WeaveSession() {
               </button>
               <button
                 className={styles.primaryBtn}
-                onClick={handlePlayPause}
+                onClick={handleRetryPlayerActivation}
                 type="button"
               >
                 OK
@@ -517,8 +538,11 @@ function errorMessage(e: unknown): string {
 
 function isSpotifyPlayerActivationError(message: string): boolean {
   return message.includes('Spotify has no available playback device')
+    || message.includes('Spotify has no active playback')
     || message.includes('Spotify found a playback device but did not provide a controllable device id')
     || message.includes('Spotify rejected the play command')
+    || message.includes('Player command failed')
+    || message.includes('No active device')
 }
 
 function sessionFromRealtimeRow(row: unknown): Session | null {
