@@ -23,7 +23,9 @@ chrono = { workspace = true }
 reqwest = { workspace = true }
 dashmap = "6"
 tokio-util = { version = "0.7", features = ["rt"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
 spotify = { path = "../spotify" }
 db = { path = "../db" }
 weave = { path = "../weave" }
 party = { path = "../party" }
+playback = { path = "../playback" }

@@ -3,10 +3,14 @@
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
+    response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
     Json, Router,
 };
 use serde_json::Value;
+use std::convert::Infallible;
+use tokio::sync::broadcast;
+use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 use uuid::Uuid;
 
 use crate::{AppState, HeartbeatTask};
@@ -30,6 +34,7 @@ pub fn router() -> Router<AppState> {
         .route("/sessions/active", get(get_active_session))
         .route("/sessions/{id}/skip-song", post(skip_song))
         .route("/sessions/{id}/skip-turn", post(skip_turn))
+        .route("/sessions/{id}/events", get(session_events))
         .route("/sessions/{id}/playback", get(get_playback))
         .route("/sessions/{id}/heartbeat", post(restart_heartbeat))
         .route("/sessions/{id}/pause", post(pause_session))
@@ -203,15 +208,23 @@ async fn get_access_token(
 
 fn spawn_heartbeat(state: &AppState, session_id: Uuid) {
     let run_id = Uuid::new_v4();
+    state.weave_heartbeat_idle.remove(&session_id);
     let params = weave::heartbeat::HeartbeatParams {
         session_id,
         pool: state.pool.clone(),
+        events: weave_event_sender(state, session_id),
     };
     let heartbeat_tasks = state.heartbeat_tasks.clone();
+    let heartbeat_idle = state.weave_heartbeat_idle.clone();
 
     let fut = async move {
-        weave::heartbeat::run(params).await;
-        heartbeat_tasks.remove_if(&session_id, |_, task| task.run_id == run_id);
+        let stop_reason = weave::heartbeat::run(params).await;
+        let removed = heartbeat_tasks
+            .remove_if(&session_id, |_, task| task.run_id == run_id)
+            .is_some();
+        if removed && stop_reason == Some(playback::StopReason::Idle) {
+            heartbeat_idle.insert(session_id);
+        }
     };
     let handle = tokio::spawn(fut).abort_handle();
     state.heartbeat_tasks.insert(
@@ -221,6 +234,27 @@ fn spawn_heartbeat(state: &AppState, session_id: Uuid) {
             abort_handle: handle,
         },
     );
+    broadcast_weave_event(state, session_id, "heartbeat_awake");
+}
+
+fn weave_event_sender(state: &AppState, session_id: Uuid) -> broadcast::Sender<String> {
+    if let Some(sender) = state.weave_events.get(&session_id) {
+        return sender.clone();
+    }
+
+    let (sender, _) = broadcast::channel(128);
+    state.weave_events.insert(session_id, sender.clone());
+    sender
+}
+
+fn broadcast_weave_event(state: &AppState, session_id: Uuid, event: &str) {
+    let _ = weave_event_sender(state, session_id).send(event.to_string());
+}
+
+fn broadcast_weave_events(state: &AppState, session_id: Uuid, events: &[&str]) {
+    for event in events {
+        broadcast_weave_event(state, session_id, event);
+    }
 }
 
 fn stop_heartbeat(state: &AppState, session_id: Uuid) {
@@ -230,8 +264,27 @@ fn stop_heartbeat(state: &AppState, session_id: Uuid) {
 }
 
 fn ensure_heartbeat(state: &AppState, session: &db::weave::WeaveSession) {
-    if session.is_active && !state.heartbeat_tasks.contains_key(&session.id) {
+    if session.is_active
+        && !state.weave_heartbeat_idle.contains(&session.id)
+        && !state.heartbeat_tasks.contains_key(&session.id)
+    {
         spawn_heartbeat(state, session.id);
+    }
+}
+
+fn wake_heartbeat(state: &AppState, session: &db::weave::WeaveSession) {
+    if !session.is_active {
+        return;
+    }
+
+    if state.weave_heartbeat_idle.remove(&session.id).is_some() {
+        stop_heartbeat(state, session.id);
+    }
+
+    if !state.heartbeat_tasks.contains_key(&session.id) {
+        spawn_heartbeat(state, session.id);
+    } else {
+        broadcast_weave_event(state, session.id, "heartbeat_awake");
     }
 }
 
@@ -281,6 +334,8 @@ async fn cache_playback(
         .await
         {
             tracing::warn!("failed to cache playback state after {context}: {e:#}");
+        } else {
+            broadcast_weave_event(state, session_id, "playback");
         }
     }
 }
@@ -371,6 +426,7 @@ async fn create_session(
 
     stop_heartbeat(&state, session.id);
     spawn_heartbeat(&state, session.id);
+    broadcast_weave_events(&state, session.id, &["session", "playback", "queue"]);
 
     Ok(Json(session.into()))
 }
@@ -390,6 +446,41 @@ async fn get_active_session(
     }
 
     Ok(Json(session.map(Into::into)))
+}
+
+async fn session_events(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<Uuid>,
+) -> Result<
+    Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>,
+    (StatusCode, Json<Value>),
+> {
+    let user_id = crate::routes::session::cached_user_id_from_headers(&state, &headers).await?;
+    let session = get_verified_session(&state, session_id, user_id).await?;
+    ensure_heartbeat(&state, &session);
+
+    let initial_event = if state.weave_heartbeat_idle.contains(&session_id) {
+        "heartbeat_idle"
+    } else {
+        "heartbeat_awake"
+    };
+    let initial = tokio_stream::once(Ok(Event::default()
+        .event("weave")
+        .data(serde_json::json!({ "type": initial_event }).to_string())));
+    let stream = initial.chain(
+        BroadcastStream::new(weave_event_sender(&state, session_id).subscribe()).filter_map(
+            |message| {
+                message.ok().map(|event| {
+                    Ok(Event::default()
+                        .event("weave")
+                        .data(serde_json::json!({ "type": event }).to_string()))
+                })
+            },
+        ),
+    );
+
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 async fn skip_song(
@@ -434,7 +525,8 @@ async fn skip_song(
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "session not found"))?;
 
-    ensure_heartbeat(&state, &updated);
+    wake_heartbeat(&state, &updated);
+    broadcast_weave_events(&state, session_id, &["session", "playback", "queue"]);
 
     Ok(Json(updated.into()))
 }
@@ -481,7 +573,8 @@ async fn skip_turn(
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "session not found"))?;
 
-    ensure_heartbeat(&state, &updated);
+    wake_heartbeat(&state, &updated);
+    broadcast_weave_events(&state, session_id, &["session", "playback", "queue"]);
 
     Ok(Json(updated.into()))
 }
@@ -565,7 +658,7 @@ async fn resume_session(
         .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
 
     cache_playback(&state, session_id, playback.as_ref(), "resume").await;
-    ensure_heartbeat(&state, &session);
+    wake_heartbeat(&state, &session);
 
     Ok(Json(playback.map(Into::into)))
 }
@@ -588,7 +681,7 @@ async fn restart_session(
         .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
 
     cache_playback(&state, session_id, playback.as_ref(), "restart").await;
-    ensure_heartbeat(&state, &session);
+    wake_heartbeat(&state, &session);
 
     Ok(Json(playback.map(Into::into)))
 }
@@ -693,6 +786,7 @@ async fn add_queue_track(
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "session not found"))?;
 
+    broadcast_weave_event(&state, session_id, "queue");
     Ok(Json(build_queue_response(&updated)))
 }
 
@@ -743,6 +837,7 @@ async fn reorder_playlist_queue(
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "session not found"))?;
 
+    broadcast_weave_event(&state, session_id, "queue");
     Ok(Json(build_queue_response(&updated)))
 }
 
@@ -808,6 +903,7 @@ async fn remove_playlist_queue_track(
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "session not found"))?;
 
+    broadcast_weave_event(&state, session_id, "queue");
     Ok(Json(build_queue_response(&updated)))
 }
 
@@ -825,6 +921,7 @@ async fn end_session(
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     stop_heartbeat(&state, session_id);
+    broadcast_weave_event(&state, session_id, "ended");
 
     Ok(Json(serde_json::json!({ "ok": true })))
 }

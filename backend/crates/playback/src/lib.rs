@@ -12,6 +12,12 @@ pub struct HeartbeatParams<D> {
     pub driver: D,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopReason {
+    Inactive,
+    Idle,
+}
+
 pub trait HeartbeatDriver: Send + Sync + 'static {
     type Session: Send + Sync;
 
@@ -45,20 +51,28 @@ pub trait HeartbeatDriver: Send + Sync + 'static {
     ) -> BoxFuture<'a, anyhow::Result<()>> {
         Box::pin(async { Ok(()) })
     }
+
+    fn heartbeat_idle<'a>(&'a self) -> BoxFuture<'a, anyhow::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
-pub async fn run<D>(params: HeartbeatParams<D>)
+pub async fn run<D>(params: HeartbeatParams<D>) -> Option<StopReason>
 where
     D: HeartbeatDriver,
 {
     let label = params.driver.label();
     let session_id = params.driver.session_id();
-    if let Err(e) = run_inner(params).await {
-        warn!("{label} heartbeat for session {session_id} ended with error: {e:#}");
+    match run_inner(params).await {
+        Ok(reason) => Some(reason),
+        Err(e) => {
+            warn!("{label} heartbeat for session {session_id} ended with error: {e:#}");
+            None
+        }
     }
 }
 
-async fn run_inner<D>(params: HeartbeatParams<D>) -> anyhow::Result<()>
+async fn run_inner<D>(params: HeartbeatParams<D>) -> anyhow::Result<StopReason>
 where
     D: HeartbeatDriver,
 {
@@ -80,7 +94,7 @@ where
             Some(s) if driver.is_active(&s) => s,
             _ => {
                 info!("{label} heartbeat: session {session_id} no longer active, stopping");
-                return Ok(());
+                return Ok(StopReason::Inactive);
             }
         };
 
@@ -96,7 +110,10 @@ where
                     info!(
                         "{label} heartbeat: session {session_id} had no playback for three polls, stopping"
                     );
-                    return Ok(());
+                    if let Err(e) = driver.heartbeat_idle().await {
+                        warn!("{label} heartbeat: failed to publish idle state: {e:#}");
+                    }
+                    return Ok(StopReason::Idle);
                 }
                 continue;
             }
@@ -116,7 +133,10 @@ where
             paused_observations = paused_observations.saturating_add(1);
             if paused_observations >= 3 {
                 info!("{label} heartbeat: session {session_id} paused for three polls, stopping");
-                return Ok(());
+                if let Err(e) = driver.heartbeat_idle().await {
+                    warn!("{label} heartbeat: failed to publish idle state: {e:#}");
+                }
+                return Ok(StopReason::Idle);
             }
         }
 
@@ -140,7 +160,7 @@ where
                 Some(s) if driver.is_active(&s) => s,
                 _ => {
                     info!("{label} heartbeat: session {session_id} no longer active, stopping");
-                    return Ok(());
+                    return Ok(StopReason::Inactive);
                 }
             };
         }

@@ -3,13 +3,18 @@
 use axum::{
     extract::{Path, Query, State},
     http::{header, HeaderMap, StatusCode},
-    response::IntoResponse,
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse,
+    },
     routing::{delete, get, post},
     Json, Router,
 };
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use std::{collections::HashMap, collections::HashSet, str::FromStr};
+use std::{collections::HashMap, collections::HashSet, convert::Infallible, str::FromStr};
+use tokio::sync::broadcast;
+use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 use uuid::Uuid;
 
 use crate::{AppState, HeartbeatTask};
@@ -33,7 +38,9 @@ pub fn router() -> Router<AppState> {
         .route("/sessions/active", get(get_active_session))
         .route("/sessions/join", post(join_session))
         .route("/sessions/{id}", get(get_session))
+        .route("/sessions/{id}/events", get(session_events))
         .route("/sessions/{id}/playback", get(get_playback))
+        .route("/sessions/{id}/heartbeat", post(restart_heartbeat))
         .route("/sessions/{id}/pause", post(pause_session))
         .route("/sessions/{id}/resume", post(resume_session))
         .route("/sessions/{id}/restart", post(restart_session))
@@ -73,15 +80,23 @@ pub fn router() -> Router<AppState> {
 
 fn spawn_heartbeat(state: &AppState, session_id: Uuid) {
     let run_id = Uuid::new_v4();
+    state.party_heartbeat_idle.remove(&session_id);
     let params = party::heartbeat::HeartbeatParams {
         session_id,
         pool: state.pool.clone(),
+        events: party_event_sender(state, session_id),
     };
     let heartbeat_tasks = state.heartbeat_tasks.clone();
+    let heartbeat_idle = state.party_heartbeat_idle.clone();
 
     let fut = async move {
-        party::heartbeat::run(params).await;
-        heartbeat_tasks.remove_if(&session_id, |_, task| task.run_id == run_id);
+        let stop_reason = party::heartbeat::run(params).await;
+        let removed = heartbeat_tasks
+            .remove_if(&session_id, |_, task| task.run_id == run_id)
+            .is_some();
+        if removed && stop_reason == Some(playback::StopReason::Idle) {
+            heartbeat_idle.insert(session_id);
+        }
     };
     let handle = tokio::spawn(fut).abort_handle();
     state.heartbeat_tasks.insert(
@@ -91,11 +106,51 @@ fn spawn_heartbeat(state: &AppState, session_id: Uuid) {
             abort_handle: handle,
         },
     );
+    broadcast_party_event(state, session_id, "heartbeat_awake");
+}
+
+fn party_event_sender(state: &AppState, session_id: Uuid) -> broadcast::Sender<String> {
+    if let Some(sender) = state.party_events.get(&session_id) {
+        return sender.clone();
+    }
+
+    let (sender, _) = broadcast::channel(128);
+    state.party_events.insert(session_id, sender.clone());
+    sender
+}
+
+fn broadcast_party_event(state: &AppState, session_id: Uuid, event: &str) {
+    let _ = party_event_sender(state, session_id).send(event.to_string());
+}
+
+fn broadcast_party_events(state: &AppState, session_id: Uuid, events: &[&str]) {
+    for event in events {
+        broadcast_party_event(state, session_id, event);
+    }
 }
 
 fn ensure_heartbeat(state: &AppState, session: &db::party::PartySession) {
-    if session.is_active && !state.heartbeat_tasks.contains_key(&session.id) {
+    if session.is_active
+        && !state.party_heartbeat_idle.contains(&session.id)
+        && !state.heartbeat_tasks.contains_key(&session.id)
+    {
         spawn_heartbeat(state, session.id);
+    }
+}
+
+fn wake_heartbeat(state: &AppState, session: &db::party::PartySession) {
+    if !session.is_active {
+        return;
+    }
+
+    if state.party_heartbeat_idle.remove(&session.id).is_some() {
+        stop_heartbeat(state, session.id);
+    }
+
+    if !state.heartbeat_tasks.contains_key(&session.id) {
+        spawn_heartbeat(state, session.id);
+    } else {
+        broadcast_party_event(state, session.id, "heartbeat_awake");
     }
 }
 
@@ -516,6 +571,7 @@ async fn create_session(
                 stop_heartbeat(&state, session.id);
                 spawn_heartbeat(&state, session.id);
                 let updated = get_existing_session(&state, session.id).await?;
+                broadcast_party_events(&state, session.id, &["session", "queue", "source_queue"]);
                 return Ok(Json(session_response(updated, &actor, None)));
             }
             Err(e) => last_error = Some(e),
@@ -606,6 +662,44 @@ async fn get_session(
     Ok(Json(session_response(session, &actor, None)))
 }
 
+async fn session_events(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<Uuid>,
+) -> Result<
+    Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>,
+    (StatusCode, Json<Value>),
+> {
+    let actor = actor_from_headers(&state, &headers).await?;
+    let session = get_existing_session(&state, session_id).await?;
+    if !actor.can_access_session(session.id) {
+        return Err(err(StatusCode::FORBIDDEN, "not your party session"));
+    }
+    ensure_heartbeat(&state, &session);
+
+    let initial_event = if state.party_heartbeat_idle.contains(&session_id) {
+        "heartbeat_idle"
+    } else {
+        "heartbeat_awake"
+    };
+    let initial = tokio_stream::once(Ok(Event::default()
+        .event("party")
+        .data(serde_json::json!({ "type": initial_event }).to_string())));
+    let stream = initial.chain(
+        BroadcastStream::new(party_event_sender(&state, session_id).subscribe()).filter_map(
+            |message| {
+                message.ok().map(|event| {
+                    Ok(Event::default()
+                        .event("party")
+                        .data(serde_json::json!({ "type": event }).to_string()))
+                })
+            },
+        ),
+    );
+
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
 async fn get_playback(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -618,6 +712,42 @@ async fn get_playback(
     }
 
     Ok(Json(playback_from_session(&session)))
+}
+
+async fn restart_heartbeat(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<Uuid>,
+) -> ApiResult<Option<PlaybackResponse>> {
+    let user_id = user_actor_from_headers(&state, &headers)
+        .await?
+        .user_id()
+        .expect("user actor should have user id");
+    let session = get_host_session(&state, session_id, user_id).await?;
+    let access_token = get_access_token(&state, session.host_user_id).await?;
+
+    let playback = spotify::player::get_playback_state(&access_token)
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?
+        .ok_or_else(|| err(StatusCode::BAD_GATEWAY, "Spotify has no active playback"))?;
+
+    if let Err(e) = db::party::update_playback_state(
+        &state.pool,
+        session_id,
+        &playback.track_uri,
+        playback.progress_ms as i64,
+        playback.duration_ms as i64,
+        playback.is_playing,
+    )
+    .await
+    {
+        tracing::warn!("failed to cache playback state after heartbeat restart: {e:#}");
+    }
+
+    broadcast_party_event(&state, session_id, "playback");
+    wake_heartbeat(&state, &session);
+
+    Ok(Json(Some(playback.into())))
 }
 
 fn playback_from_session(session: &db::party::PartySession) -> Option<PlaybackResponse> {
@@ -665,6 +795,7 @@ async fn pause_session(
         }
     }
 
+    broadcast_party_event(&state, session_id, "playback");
     ensure_heartbeat(&state, &session);
 
     Ok(Json(playback.map(Into::into)))
@@ -705,7 +836,8 @@ async fn resume_session(
         }
     }
 
-    ensure_heartbeat(&state, &session);
+    broadcast_party_event(&state, session_id, "playback");
+    wake_heartbeat(&state, &session);
 
     Ok(Json(playback.map(Into::into)))
 }
@@ -745,7 +877,8 @@ async fn restart_session(
         }
     }
 
-    ensure_heartbeat(&state, &session);
+    broadcast_party_event(&state, session_id, "playback");
+    wake_heartbeat(&state, &session);
 
     Ok(Json(playback.map(Into::into)))
 }
@@ -840,7 +973,12 @@ async fn skip_to_next(
     if updated.mode == db::party::PartyMode::BalancedQueue.as_str() {
         persist_balanced_queue_order(&state, session_id, played_owner_key.as_deref()).await?;
     }
-    ensure_heartbeat(&state, &updated);
+    wake_heartbeat(&state, &updated);
+    broadcast_party_events(
+        &state,
+        session_id,
+        &["session", "playback", "queue", "source_queue", "played"],
+    );
     Ok(Json(session_response(updated, &actor, None)))
 }
 
@@ -900,6 +1038,7 @@ async fn update_mode(
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
+    broadcast_party_events(&state, session_id, &["session", "queue", "source_queue"]);
     Ok(Json(session_response(session, &actor, None)))
 }
 
@@ -950,6 +1089,7 @@ async fn update_settings(
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
     let updated = get_existing_session(&state, session_id).await?;
+    broadcast_party_events(&state, session_id, &["session", "queue", "source_queue"]);
     Ok(Json(session_response(updated, &actor, None)))
 }
 
@@ -1082,6 +1222,7 @@ async fn add_queue_track(
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
+    broadcast_party_events(&state, session_id, &["queue", "source_queue"]);
     Ok(Json(
         build_queue_response(&state, session_id, &actor).await?,
     ))
@@ -1132,6 +1273,7 @@ async fn add_queue_playlist(
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
+    broadcast_party_events(&state, session_id, &["queue", "source_queue"]);
     Ok(Json(
         build_queue_response(&state, session_id, &actor).await?,
     ))
@@ -1169,6 +1311,7 @@ async fn set_source_queue_item_disabled(
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
+    broadcast_party_events(&state, session_id, &["queue", "source_queue"]);
     Ok(Json(build_source_queue_response(&state, session_id).await?))
 }
 
@@ -1267,6 +1410,7 @@ async fn reorder_queue(
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
+    broadcast_party_events(&state, session_id, &["queue", "source_queue"]);
     Ok(Json(
         build_queue_response(&state, session_id, &actor).await?,
     ))
@@ -1306,6 +1450,7 @@ async fn remove_queue_track(
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
+    broadcast_party_events(&state, session_id, &["queue", "source_queue"]);
     Ok(Json(
         build_queue_response(&state, session_id, &actor).await?,
     ))
@@ -1352,6 +1497,7 @@ async fn vote_queue_item(
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
+    broadcast_party_event(&state, session_id, "queue");
     Ok(Json(
         build_queue_response(&state, session_id, &actor).await?,
     ))
@@ -1384,6 +1530,7 @@ async fn unvote_queue_item(
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
+    broadcast_party_event(&state, session_id, "queue");
     Ok(Json(
         build_queue_response(&state, session_id, &actor).await?,
     ))
@@ -1414,6 +1561,7 @@ async fn unpin_queue_item(
         id: user_id,
         display_name: String::new(),
     };
+    broadcast_party_event(&state, session_id, "queue");
     Ok(Json(
         build_queue_response(&state, session_id, &actor).await?,
     ))
@@ -1561,6 +1709,7 @@ async fn end_session(
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     stop_heartbeat(&state, session_id);
+    broadcast_party_event(&state, session_id, "ended");
 
     Ok(Json(serde_json::json!({ "ok": true })))
 }

@@ -1,6 +1,6 @@
 # Ensemble
 
-Ensemble is a collaborative Spotify listening PWA. Two people take turns picking songs from their respective playlists (called **Weave** mode). The backend is Rust/Axum, the frontend is React + Vite, and the database is Supabase (Postgres with realtime).
+Ensemble is a collaborative Spotify listening PWA. Two people take turns picking songs from their respective playlists (called **Weave** mode). The backend is Rust/Axum, the frontend is React + Vite, and the database is Supabase Postgres.
 
 ---
 
@@ -21,7 +21,7 @@ ensemble/
 │       ├── lib/
 │       │   ├── api.ts       # generic fetch wrappers (get/post); validates VITE_API_URL at load
 │       │   ├── weave.ts     # typed API client for all Weave endpoints
-│       │   └── supabase.ts  # Supabase JS client for realtime subscriptions
+│       │   └── party.ts     # typed API client for all Party endpoints
 │       └── pages/
 │           ├── Home.tsx          # logged-out + logged-in home; mode selection
 │           ├── AuthCallback.tsx  # Spotify OAuth callback handler
@@ -68,8 +68,6 @@ ensemble/
 | Variable | Purpose |
 |---|---|
 | `VITE_API_URL` | Backend base URL, e.g. `http://127.0.0.1:3000` — **must not** have a trailing slash |
-| `VITE_SUPABASE_URL` | Supabase project URL |
-| `VITE_SUPABASE_ANON_KEY` | Supabase anon key (used only for realtime subscriptions) |
 | `VITE_SPOTIFY_REDIRECT_URI` | Same as backend's `SPOTIFY_REDIRECT_URI`; users provide their own Spotify client ID in the app |
 
 ---
@@ -118,7 +116,7 @@ Token refresh is done opportunistically: if the access token expires in <60 seco
 2. Each playlist is fetched from Spotify, shuffled, and stored in `weave_sessions.playlists` JSONB
 3. A heartbeat task (`weave::heartbeat`) is spawned per session in a `tokio::spawn`; handles are stored in a `DashMap<Uuid, AbortHandle>` on `AppState`
 4. Heartbeat polls every 5s: detects track changes, advances the active playlist index, and queues the next track when >85% through the current one
-5. Frontend subscribes to `weave_sessions` realtime updates via Supabase to refresh UI
+5. Frontend subscribes to Axum SSE session streams to refresh UI
 
 The old `playlist_a_*`, `playlist_b_*`, and `current_turn` columns still exist for migration compatibility, but current code should use `playlists`, `current_playlist_index`, and `playlist_track_indexes`.
 
@@ -141,7 +139,7 @@ When editing queue order, preserve the invariant that reordering only changes th
 - Playlist items can contain nulls (deleted tracks), so deserialize as `Vec<Option<...>>` and flatten
 
 ### RLS policies
-RLS is enabled on `users` and `weave_sessions` but the Rust backend connects as `postgres` (superuser) so RLS is bypassed. The policies exist for Supabase dashboard safety and future use.
+RLS is enabled on app tables but the Rust backend connects as `postgres` (superuser) so RLS is bypassed. The policies exist for Supabase dashboard safety and future use.
 
 ### Error formatting
 In `routes/weave.rs`, the `err()` helper uses `{e:#?}` for server-error logs (full anyhow chain) and `{e}` for the JSON response body (top-level message only).

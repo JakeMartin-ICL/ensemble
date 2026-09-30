@@ -1,4 +1,4 @@
-import { get, post } from './api'
+import { get, post, subscribeSse } from './api'
 
 const PLAYLIST_CACHE_TTL_MS = 24 * 60 * 60 * 1000
 let playlistsRequest: Promise<Playlist[]> | null = null
@@ -40,6 +40,12 @@ export interface PlaybackState {
   duration_ms: number
   is_playing: boolean
   observed_at_ms: number
+}
+
+export type WeaveEventType = 'session' | 'playback' | 'queue' | 'ended' | 'heartbeat_idle' | 'heartbeat_awake'
+
+export interface WeaveEvent {
+  type: WeaveEventType
 }
 
 export interface QueueItem {
@@ -96,6 +102,19 @@ export const skipTurn = (id: string) =>
 
 export const getPlayback = (id: string) =>
   get<PlaybackState | null>(`/weave/sessions/${id}/playback`)
+
+export const subscribeWeaveEvents = (
+  id: string,
+  onEvent: (event: WeaveEvent) => void,
+  onError?: (error: unknown) => void,
+) =>
+  subscribeSse(
+    `/weave/sessions/${id}/events`,
+    (event) => {
+      if (isWeaveEvent(event)) onEvent(event)
+    },
+    onError,
+  )
 
 export const restartHeartbeat = (id: string) =>
   post<PlaybackState | null>(`/weave/sessions/${id}/heartbeat`, {})
@@ -207,4 +226,15 @@ function isCachedPlaylists(value: unknown): value is CachedPlaylists {
   if (typeof value !== 'object' || value === null) return false
   const candidate = value as { expires_at?: unknown; value?: unknown }
   return typeof candidate.expires_at === 'number' && Array.isArray(candidate.value)
+}
+
+function isWeaveEvent(value: unknown): value is WeaveEvent {
+  if (typeof value !== 'object' || value === null) return false
+  const candidate = value as { type?: unknown }
+  return candidate.type === 'session'
+    || candidate.type === 'playback'
+    || candidate.type === 'queue'
+    || candidate.type === 'ended'
+    || candidate.type === 'heartbeat_idle'
+    || candidate.type === 'heartbeat_awake'
 }

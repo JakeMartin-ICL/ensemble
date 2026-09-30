@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { REALTIME_SUBSCRIBE_STATES } from '@supabase/supabase-js'
+import PlaybackProgress from '../../components/PlaybackProgress'
 import QueueList from '../../components/QueueList'
 import QueueTrackLabel from '../../components/QueueTrackLabel'
-import { supabase } from '../../lib/supabase'
 import {
   type PartyMode,
   type PartyExportMode,
@@ -28,17 +27,19 @@ import {
   pausePartySession,
   removePartyQueueTrack,
   reorderPartyQueue,
+  restartPartyHeartbeat,
   restartPartySession,
   resumePartySession,
   searchPartyTracks,
   setPartySourceQueueItemDisabled,
   skipPartySession,
+  subscribePartyEvents,
   unpinPartyQueueItem,
   updatePartyMode,
   updatePartySettings,
   votePartyQueueItem,
 } from '../../lib/party'
-import { type ObservedPlayback, currentProgress, formatTime, optimisticRestart, optimisticTogglePlaying } from '../../lib/playback'
+import { type ObservedPlayback, currentProgress, optimisticRestart, optimisticTogglePlaying } from '../../lib/playback'
 import type { TrackDetails, TrackSearchResult } from '../../lib/weave'
 import styles from '../../styles/Mode.module.css'
 
@@ -59,6 +60,7 @@ export default function PartySessionPage() {
   const [exportUrl, setExportUrl] = useState<string | null>(null)
   const [track, setTrack] = useState<TrackDetails | null>(null)
   const [playback, setPlayback] = useState<ObservedPlayback | null>(null)
+  const [heartbeatIdle, setHeartbeatIdle] = useState(false)
   const [libraryTracks, setLibraryTracks] = useState<TrackSearchResult[]>([])
   const [libraryPlaylists, setLibraryPlaylists] = useState<PartyPlaylistSearchResult[]>([])
   const [libraryLoading, setLibraryLoading] = useState(false)
@@ -119,76 +121,58 @@ export default function PartySessionPage() {
   }, [session?.id, exportMode])
 
   useEffect(() => {
+    setHeartbeatIdle(false)
+  }, [session?.id])
+
+  useEffect(() => {
     if (!session?.id) return
+    const sessionId = session.id
 
-    const channel = supabase
-      .channel(`party-session-${session.id}`)
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'party_queue_items',
-          filter: `session_id=eq.${session.id}`,
-        },
-        () => {
-          refreshQueues(session.id)
-        },
-      )
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'party_source_queue_items',
-          filter: `session_id=eq.${session.id}`,
-        },
-        () => {
-          if (sourceQueueOpen) void getPartySourceQueue(session.id).then(setSourceQueue)
-        },
-      )
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'party_played_tracks',
-          filter: `session_id=eq.${session.id}`,
-        },
-        () => {
-          refreshExportPreview(session.id, exportMode, false)
-        },
-      )
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'party_queue_votes',
-        },
-        () => {
-          refreshQueues(session.id)
-        },
-      )
-      .on(
-        'postgres_changes',
-        {
-          event: 'UPDATE',
-          schema: 'public',
-          table: 'party_sessions',
-          filter: `id=eq.${session.id}`,
-        },
-        (payload) => {
-          applyPartySessionRealtimeRow(payload.new)
-        },
-      )
-      .subscribe((status) => {
-        if (status === REALTIME_SUBSCRIBE_STATES.SUBSCRIBED) {
-          resyncPartySession(session.id)
+    const unsubscribe = subscribePartyEvents(
+      sessionId,
+      (event) => {
+        if (event.type === 'ended') {
+          localStorage.removeItem(PARTY_SESSION_KEY)
+          localStorage.removeItem(PARTY_GUEST_SESSION_KEY)
+          localStorage.removeItem(PARTY_GUEST_TOKEN_KEY)
+          void navigate('/party')
+          return
         }
-      })
+        if (event.type === 'heartbeat_idle') {
+          setHeartbeatIdle(true)
+          return
+        }
+        if (event.type === 'heartbeat_awake') {
+          wakeHeartbeatUi()
+        }
 
-    return () => { void supabase.removeChannel(channel) }
+        if (event.type === 'session') {
+          refreshSessionAndPlayback(sessionId)
+        }
+        if (event.type === 'playback') {
+          void getPartyPlayback(sessionId).then(applyPlaybackResponse).catch(() => undefined)
+        }
+        if (event.type === 'queue') {
+          refreshQueue(sessionId)
+        }
+        if (event.type === 'source_queue') {
+          refreshSourceQueue(sessionId)
+        }
+        if (event.type === 'played') {
+          refreshExportPreview(sessionId, exportMode, false)
+        }
+      },
+      (e) => {
+        if (import.meta.env.DEV) console.debug('[party events] stream error', e)
+      },
+    )
+
+    refreshSessionAndPlayback(sessionId)
+    refreshQueue(sessionId)
+    refreshSourceQueue(sessionId)
+    refreshExportPreview(sessionId, exportMode, false)
+
+    return unsubscribe
   }, [exportMode, session?.id, sourceQueueOpen])
 
   useEffect(() => {
@@ -276,6 +260,18 @@ export default function PartySessionPage() {
       .finally(() => {
         if (showLoading) setExportLoading(false)
       })
+  }
+
+  function refreshSessionAndPlayback(id = session?.id) {
+    if (!id) return
+    void getPartySession(id)
+      .then((s) => {
+        const nextSession = applyDevGuestOverride(s)
+        setSession(nextSession)
+        return getPartyPlayback(nextSession.id)
+      })
+      .then(applyPlaybackResponse)
+      .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)) })
   }
 
   const ensureLibraryLoaded = useCallback(() => {
@@ -374,6 +370,7 @@ export default function PartySessionPage() {
 
   function handleSkip() {
     if (!session?.is_host) return
+    wakeHeartbeatUi()
     const nextItem = queue.items.at(0)
     if (nextItem) {
       optimisticTrackRef.current = {
@@ -433,22 +430,11 @@ export default function PartySessionPage() {
     })
   }
 
-  function applyPartySessionRealtimeRow(row: unknown): void {
-    if (!isRecord(row)) return
-    if (row.is_active === false) {
-      localStorage.removeItem(PARTY_SESSION_KEY)
-      void navigate('/party')
-      return
-    }
-
-    setSession((current) => mergePartySessionRealtimeRow(current, row))
-    applyPlaybackResponse(playbackFromPartySessionRealtimeRow(row))
-  }
-
   function handlePlayPause() {
     if (!session?.is_host) return
     const wasPlaying = playback?.is_playing ?? false
     const action = wasPlaying ? pausePartySession : resumePartySession
+    wakeHeartbeatUi()
     setPlayback(optimisticTogglePlaying)
     void action(session.id)
       .then((p) => {
@@ -464,6 +450,7 @@ export default function PartySessionPage() {
 
   function handleRestart() {
     if (!session?.is_host) return
+    wakeHeartbeatUi()
     setPlayback(optimisticRestart)
     void restartPartySession(session.id)
       .then((p) => {
@@ -495,6 +482,23 @@ export default function PartySessionPage() {
       return true
     }
     return false
+  }
+
+  function handleRefreshHeartbeat() {
+    if (!session?.is_host) return
+    wakeHeartbeatUi()
+    void restartPartyHeartbeat(session.id)
+      .then(applyPlaybackResponse)
+      .catch((e: unknown) => {
+        void getPartyPlayback(session.id)
+          .then(applyPlaybackResponse)
+          .catch(() => undefined)
+        setError(e instanceof Error ? e.message : String(e))
+      })
+  }
+
+  function wakeHeartbeatUi() {
+    setHeartbeatIdle(false)
   }
 
   function handleEnd() {
@@ -656,7 +660,13 @@ export default function PartySessionPage() {
   return (
     <div className={styles.sessionPage}>
       <div className={styles.nowPlaying}>
-        {track?.album_art_url && <img className={styles.albumArt} src={track.album_art_url} alt="" />}
+        {track?.album_art_url && (
+          <img
+            className={`${styles.albumArt} ${heartbeatIdle ? styles.albumArtIdle : ''}`}
+            src={track.album_art_url}
+            alt=""
+          />
+        )}
         <div className={styles.trackInfo}>
           <span className={styles.trackName}>{track?.name ?? 'Party queue'}</span>
           {track?.artist && <span className={styles.artistName}>{track.artist}</span>}
@@ -786,17 +796,13 @@ export default function PartySessionPage() {
             <span />
           </div>
         )}
-        {durationMs > 0 && (
-          <div className={styles.progressPanel}>
-            <div className={styles.progressTimes}>
-              <span>{formatTime(progressMs)}</span>
-              <span>{formatTime(durationMs)}</span>
-            </div>
-            <div className={styles.progressTrack}>
-              <div className={styles.progressFill} style={{ width: `${progressPct.toString()}%` }} />
-            </div>
-          </div>
-        )}
+        <PlaybackProgress
+          durationMs={durationMs}
+          heartbeatIdle={heartbeatIdle}
+          onRefreshHeartbeat={session.is_host ? handleRefreshHeartbeat : undefined}
+          progressMs={progressMs}
+          progressPct={progressPct}
+        />
       </div>
 
       <PartyQueuePanel
@@ -943,73 +949,6 @@ function applyDevGuestOverride(session: PartySession): PartySession {
   return localStorage.getItem(PARTY_GUEST_SESSION_KEY) === session.id
     ? { ...session, is_host: false }
     : session
-}
-
-function mergePartySessionRealtimeRow(session: PartySession | null, row: Record<string, unknown>): PartySession | null {
-  if (!session || row.id !== session.id) return session
-  const sourceMinQueueSize = numericRealtimeValue(row.source_min_queue_size)
-  const sourceInsertInterval = numericRealtimeValue(row.source_insert_interval)
-  return {
-    ...session,
-    mode: isPartyMode(row.mode) ? row.mode : session.mode,
-    allow_guest_playlist_adds: typeof row.allow_guest_playlist_adds === 'boolean'
-      ? row.allow_guest_playlist_adds
-      : session.allow_guest_playlist_adds,
-    source_min_queue_size: sourceMinQueueSize ?? session.source_min_queue_size,
-    source_insert_interval: sourceInsertInterval ?? session.source_insert_interval,
-    add_added_tracks_to_source: typeof row.add_added_tracks_to_source === 'boolean'
-      ? row.add_added_tracks_to_source
-      : session.add_added_tracks_to_source,
-    show_queue_attribution: typeof row.show_queue_attribution === 'boolean'
-      ? row.show_queue_attribution
-      : session.show_queue_attribution,
-    current_track_uri: typeof row.current_track_uri === 'string' ? row.current_track_uri : null,
-  }
-}
-
-function playbackFromPartySessionRealtimeRow(row: Record<string, unknown>): ObservedPlayback | null {
-  const progressMs = numericRealtimeValue(row.playback_progress_ms)
-  const durationMs = numericRealtimeValue(row.playback_duration_ms)
-  if (
-    typeof row.playback_track_uri !== 'string'
-    || progressMs === null
-    || durationMs === null
-    || typeof row.playback_is_playing !== 'boolean'
-    || typeof row.playback_updated_at !== 'string'
-  ) {
-    return null
-  }
-
-  const observedAt = Date.parse(row.playback_updated_at)
-  if (Number.isNaN(observedAt)) return null
-  return {
-    track_uri: row.playback_track_uri,
-    progress_ms: progressMs,
-    duration_ms: durationMs,
-    is_playing: row.playback_is_playing,
-    observed_at_ms: observedAt,
-    observed_at: observedAt,
-  }
-}
-
-function isPartyMode(value: unknown): value is PartyMode {
-  return value === 'open_queue'
-    || value === 'shared_queue'
-    || value === 'voted_queue'
-    || value === 'balanced_queue'
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null
-}
-
-function numericRealtimeValue(value: unknown): number | null {
-  if (typeof value === 'number') return value
-  if (typeof value === 'string') {
-    const parsed = Number(value)
-    return Number.isFinite(parsed) ? parsed : null
-  }
-  return null
 }
 
 function exportPlaylistName() {

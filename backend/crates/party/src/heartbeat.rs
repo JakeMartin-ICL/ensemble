@@ -2,25 +2,35 @@
 
 use db::PgPool;
 use playback::{BoxFuture, HeartbeatDriver};
+use tokio::sync::broadcast;
 use uuid::Uuid;
 
 pub struct HeartbeatParams {
     pub session_id: Uuid,
     pub pool: PgPool,
+    pub events: broadcast::Sender<String>,
 }
 
-pub async fn run(params: HeartbeatParams) {
+pub async fn run(params: HeartbeatParams) -> Option<playback::StopReason> {
     let driver = PartyHeartbeat {
         session_id: params.session_id,
         pool: params.pool,
+        events: params.events,
     };
 
-    playback::run(playback::HeartbeatParams { driver }).await;
+    playback::run(playback::HeartbeatParams { driver }).await
 }
 
 struct PartyHeartbeat {
     session_id: Uuid,
     pool: PgPool,
+    events: broadcast::Sender<String>,
+}
+
+impl PartyHeartbeat {
+    fn emit(&self, event: &str) {
+        let _ = self.events.send(event.to_string());
+    }
 }
 
 impl HeartbeatDriver for PartyHeartbeat {
@@ -82,6 +92,8 @@ impl HeartbeatDriver for PartyHeartbeat {
                 },
             )
             .await?;
+            self.emit("session");
+            self.emit("played");
             Ok(())
         })
     }
@@ -138,6 +150,10 @@ impl HeartbeatDriver for PartyHeartbeat {
             } else {
                 db::party::refill_queue_from_source(&self.pool, self.session_id).await?;
             }
+            self.emit("session");
+            self.emit("queue");
+            self.emit("source_queue");
+            self.emit("played");
             Ok(())
         })
     }
@@ -175,7 +191,9 @@ impl HeartbeatDriver for PartyHeartbeat {
 
     fn set_queued_track<'a>(&'a self, track_uri: &'a str) -> BoxFuture<'a, anyhow::Result<()>> {
         Box::pin(async move {
-            db::party::set_queued_track(&self.pool, self.session_id, track_uri).await
+            db::party::set_queued_track(&self.pool, self.session_id, track_uri).await?;
+            self.emit("session");
+            Ok(())
         })
     }
 
@@ -192,7 +210,16 @@ impl HeartbeatDriver for PartyHeartbeat {
                 playback.duration_ms as i64,
                 playback.is_playing,
             )
-            .await
+            .await?;
+            self.emit("playback");
+            Ok(())
+        })
+    }
+
+    fn heartbeat_idle<'a>(&'a self) -> BoxFuture<'a, anyhow::Result<()>> {
+        Box::pin(async move {
+            self.emit("heartbeat_idle");
+            Ok(())
         })
     }
 }

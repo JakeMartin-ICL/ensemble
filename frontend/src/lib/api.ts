@@ -63,3 +63,69 @@ export async function del<T>(path: string, headers?: Record<string, string>): Pr
   if (!res.ok) throw new Error(await errorMessage(res))
   return res.json() as Promise<T>
 }
+
+export function subscribeSse(
+  path: string,
+  onEvent: (event: unknown) => void,
+  onError?: (error: unknown) => void,
+): () => void {
+  let stopped = false
+  let retryTimer: number | null = null
+  let controller: AbortController | null = null
+
+  function start() {
+    controller = new AbortController()
+    void readSse(path, controller.signal, onEvent)
+      .catch((e: unknown) => {
+        if (!stopped && !(e instanceof DOMException && e.name === 'AbortError')) {
+          onError?.(e)
+        }
+      })
+      .finally(() => {
+        if (!stopped) {
+          retryTimer = window.setTimeout(start, 1_500)
+        }
+      })
+  }
+
+  start()
+
+  return () => {
+    stopped = true
+    if (retryTimer !== null) window.clearTimeout(retryTimer)
+    controller?.abort()
+  }
+}
+
+async function readSse(
+  path: string,
+  signal: AbortSignal,
+  onEvent: (event: unknown) => void,
+): Promise<void> {
+  const res = await fetch(`${BASE_URL}${path}`, {
+    headers: { ...authHeaders(path), Accept: 'text/event-stream' },
+    signal,
+  })
+  if (!res.ok) throw new Error(await errorMessage(res))
+  if (!res.body) throw new Error('SSE response has no body')
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  for (;;) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const messages = buffer.split('\n\n')
+    buffer = messages.pop() ?? ''
+    for (const message of messages) {
+      const data = message
+        .split('\n')
+        .filter((line) => line.startsWith('data:'))
+        .map((line) => line.slice(5).trimStart())
+        .join('\n')
+      if (data) onEvent(JSON.parse(data) as unknown)
+    }
+  }
+}

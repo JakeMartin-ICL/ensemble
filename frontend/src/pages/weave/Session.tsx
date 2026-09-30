@@ -1,10 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { REALTIME_SUBSCRIBE_STATES } from '@supabase/supabase-js'
+import PlaybackProgress from '../../components/PlaybackProgress'
 import QueueList from '../../components/QueueList'
 import QueueTrackLabel from '../../components/QueueTrackLabel'
-import { supabase } from '../../lib/supabase'
 import {
   type QueueItem,
   type QueueState,
@@ -27,8 +26,9 @@ import {
   searchQueueTracks,
   skipSong,
   skipTurn,
+  subscribeWeaveEvents,
 } from '../../lib/weave'
-import { type ObservedPlayback, currentProgress, formatTime, optimisticRestart, optimisticTogglePlaying } from '../../lib/playback'
+import { type ObservedPlayback, currentProgress, optimisticRestart, optimisticTogglePlaying } from '../../lib/playback'
 import styles from '../../styles/Mode.module.css'
 
 const PLAYLIST_COLORS = [
@@ -58,8 +58,6 @@ export default function WeaveSession() {
   const [error, setError] = useState<string | null>(null)
   const [playbackError, setPlaybackError] = useState<string | null>(null)
   const [playerPromptOpen, setPlayerPromptOpen] = useState(false)
-  const pausedObservationCountRef = useRef(0)
-  const lastPausedObservedAtRef = useRef<number | null>(null)
   const lastForegroundRefreshAtRef = useRef(0)
   const optimisticTrackRef = useRef<{ uri: string; until: number } | null>(null)
   const navigate = useNavigate()
@@ -87,8 +85,6 @@ export default function WeaveSession() {
   }, [navigate])
 
   useEffect(() => {
-    pausedObservationCountRef.current = 0
-    lastPausedObservedAtRef.current = null
     setHeartbeatIdle(false)
   }, [session?.id])
 
@@ -158,58 +154,64 @@ export default function WeaveSession() {
       })
   }, [session?.current_track_uri])
 
-  // Realtime subscription — refresh session when DB row updates
   useEffect(() => {
-    if (!session) return
-    const channel = supabase
-      .channel(`weave-session-${session.id}`)
-      .on(
-        'postgres_changes',
-        {
-          event: 'UPDATE',
-          schema: 'public',
-          table: 'weave_sessions',
-          filter: `id=eq.${session.id}`,
-        },
-        (payload) => {
-          if (isInactiveRealtimeRow(payload.new)) {
-            void navigate('/weave')
-            return
-          }
+    if (!session?.id) return
+    const sessionId = session.id
 
-          const nextSession = sessionFromRealtimeRow(payload.new)
-          if (nextSession) {
-            setSession(nextSession)
-            applyPlaybackResponse(playbackFromRealtimeRow(payload.new))
-            if (queueOpen) {
-              void getQueue(nextSession.id).then(setQueue).catch((e: unknown) => {
-                setError(e instanceof Error ? e.message : String(e))
-              })
-            }
-          }
-        },
-      )
-      .subscribe((status) => {
-        if (status === REALTIME_SUBSCRIBE_STATES.SUBSCRIBED) {
-          void getActiveSession().then((s) => {
-            if (!s) {
-              void navigate('/weave')
-              return
-            }
-            setSession(s)
-            void getPlayback(s.id).then(applyPlaybackResponse).catch(() => undefined)
-            if (queueOpen) {
-              void getQueue(s.id).then(setQueue).catch((e: unknown) => {
-                setError(e instanceof Error ? e.message : String(e))
-              })
-            }
-          }).catch((e: unknown) => {
+    const unsubscribe = subscribeWeaveEvents(
+      sessionId,
+      (event) => {
+        if (event.type === 'ended') {
+          void navigate('/weave')
+          return
+        }
+        if (event.type === 'heartbeat_idle') {
+          setHeartbeatIdle(true)
+          return
+        }
+        if (event.type === 'heartbeat_awake') {
+          wakeHeartbeatUi()
+        }
+        if (event.type === 'session') {
+          refreshSessionAndPlayback(sessionId)
+        }
+        if (event.type === 'playback') {
+          void getPlayback(sessionId).then(applyPlaybackResponse).catch(() => undefined)
+        }
+        if (event.type === 'queue' && queueOpen) {
+          void getQueue(sessionId).then(setQueue).catch((e: unknown) => {
             setError(e instanceof Error ? e.message : String(e))
           })
         }
+      },
+      (e) => {
+        if (import.meta.env.DEV) console.debug('[weave events] stream error', e)
+      },
+    )
+
+    refreshSessionAndPlayback(sessionId)
+    if (queueOpen) {
+      void getQueue(sessionId).then(setQueue).catch((e: unknown) => {
+        setError(e instanceof Error ? e.message : String(e))
       })
-    return () => { void supabase.removeChannel(channel) }
+    }
+
+    return unsubscribe
   }, [navigate, queueOpen, session?.id])
+
+  function refreshSessionAndPlayback(id = session?.id) {
+    if (!id) return
+    void getActiveSession().then((s) => {
+      if (!s) {
+        void navigate('/weave')
+        return
+      }
+      setSession(s)
+      void getPlayback(s.id).then(applyPlaybackResponse).catch(() => undefined)
+    }).catch((e: unknown) => {
+      setError(e instanceof Error ? e.message : String(e))
+    })
+  }
 
   function handleSkipSong() {
     if (!session) return
@@ -362,7 +364,7 @@ export default function WeaveSession() {
 
   function handleRefreshHeartbeat() {
     if (!session) return
-    wakeHeartbeatUi(playback?.observed_at ?? null)
+    wakeHeartbeatUi()
     setPlaybackError(null)
     setPlayerPromptOpen(false)
     void restartHeartbeat(session.id)
@@ -436,9 +438,7 @@ export default function WeaveSession() {
     }, 800)
   }
 
-  function wakeHeartbeatUi(ignorePausedObservedAt: number | null = null) {
-    pausedObservationCountRef.current = 0
-    lastPausedObservedAtRef.current = ignorePausedObservedAt
+  function wakeHeartbeatUi() {
     setHeartbeatIdle(false)
   }
 
@@ -570,28 +570,13 @@ export default function WeaveSession() {
             <SkipTurnIcon />
           </button>
         </div>
-        <div className={styles.progressDock}>
-          <div className={`${styles.progressPanel} ${heartbeatIdle ? styles.progressPanelIdle : ''}`}>
-            <div className={styles.progressTimes}>
-              <span>{formatTime(progressMs)}</span>
-              <span>{formatTime(durationMs)}</span>
-            </div>
-            <div className={styles.progressTrack}>
-              <div className={styles.progressFill} style={{ width: `${progressPct.toString()}%` }} />
-            </div>
-          </div>
-          {heartbeatIdle && (
-            <button
-              className={`${styles.iconBtn} ${styles.refreshHeartbeatBtn}`}
-              onClick={handleRefreshHeartbeat}
-              aria-label="Refresh playback"
-              title="Refresh playback"
-              type="button"
-            >
-              <RefreshIcon />
-            </button>
-          )}
-        </div>
+        <PlaybackProgress
+          durationMs={durationMs}
+          heartbeatIdle={heartbeatIdle}
+          onRefreshHeartbeat={handleRefreshHeartbeat}
+          progressMs={progressMs}
+          progressPct={progressPct}
+        />
         {playbackError && <p className={styles.inlineError}>{playbackError}</p>}
       </div>
 
@@ -668,74 +653,6 @@ function isSpotifyPlayerActivationError(message: string): boolean {
     || message.includes('No active device')
 }
 
-function sessionFromRealtimeRow(row: unknown): Session | null {
-  if (!isRecord(row)) return null
-  const { id, playlists: rawPlaylists, current_playlist_index: currentPlaylistIndex } = row
-  if (typeof id !== 'string' || typeof currentPlaylistIndex !== 'number' || !Array.isArray(rawPlaylists)) {
-    return null
-  }
-
-  const playlists = rawPlaylists.flatMap((playlist): Session['playlists'] => {
-    if (!isRecord(playlist) || typeof playlist.id !== 'string' || typeof playlist.name !== 'string') {
-      return []
-    }
-    return [{ id: playlist.id, name: playlist.name }]
-  })
-  const current = playlists.at(currentPlaylistIndex)
-  const currentTrackUri = typeof row.current_track_uri === 'string' ? row.current_track_uri : null
-
-  return {
-    id,
-    playlists,
-    current_playlist_index: currentPlaylistIndex,
-    current_playlist_id: current?.id ?? '',
-    current_playlist_name: current?.name ?? '',
-    current_track_uri: currentTrackUri,
-  }
-}
-
-function playbackFromRealtimeRow(row: unknown): PlaybackState | null {
-  if (!isRecord(row)) return null
-  const progressMs = numericRealtimeValue(row.playback_progress_ms)
-  const durationMs = numericRealtimeValue(row.playback_duration_ms)
-  if (
-    typeof row.playback_track_uri !== 'string'
-    || progressMs === null
-    || durationMs === null
-    || typeof row.playback_is_playing !== 'boolean'
-    || typeof row.playback_updated_at !== 'string'
-  ) {
-    return null
-  }
-
-  const observedAt = Date.parse(row.playback_updated_at)
-  if (Number.isNaN(observedAt)) return null
-  return {
-    track_uri: row.playback_track_uri,
-    progress_ms: progressMs,
-    duration_ms: durationMs,
-    is_playing: row.playback_is_playing,
-    observed_at_ms: observedAt,
-  }
-}
-
-function numericRealtimeValue(value: unknown): number | null {
-  if (typeof value === 'number') return value
-  if (typeof value === 'string') {
-    const parsed = Number(value)
-    return Number.isFinite(parsed) ? parsed : null
-  }
-  return null
-}
-
-function isInactiveRealtimeRow(row: unknown): boolean {
-  return isRecord(row) && row.is_active === false
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null
-}
-
 function IconSvg({ children }: { children: ReactNode }) {
   return (
     <svg className={styles.iconSvg} viewBox="0 0 24 24" aria-hidden="true">
@@ -764,14 +681,6 @@ function RestartIcon() {
   return (
     <IconSvg>
       <path d="M5 5h2v14H5zM19 5v14l-10-7z" />
-    </IconSvg>
-  )
-}
-
-function RefreshIcon() {
-  return (
-    <IconSvg>
-      <path d="M17.65 6.35A7.95 7.95 0 0 0 12 4a8 8 0 1 0 7.75 10h-2.1A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h8V3z" />
     </IconSvg>
   )
 }

@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { get } from '../lib/api'
-import { supabase } from '../lib/supabase'
 import {
   getStoredSpotifyClientId,
   hasAcknowledgedSpotifySetup,
@@ -134,20 +133,6 @@ function LoggedIn({ userId }: { userId: string }) {
       .catch((e: unknown) => {
         setError(e instanceof Error ? e.message : String(e))
       })
-  }, [userId])
-
-  useEffect(() => {
-    const channel = supabase
-      .channel(`user-updates-${userId}`)
-      .on(
-        'postgres_changes',
-        { event: 'UPDATE', schema: 'public', table: 'users', filter: `id=eq.${userId}` },
-        () => {
-          void get<MeResponse>('/me').then(setMe)
-        },
-      )
-      .subscribe()
-    return () => { void supabase.removeChannel(channel) }
   }, [userId])
 
   function handleLogout() {

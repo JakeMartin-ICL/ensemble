@@ -7,8 +7,9 @@ use axum::{
     routing::get,
     Router,
 };
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use std::sync::Arc;
+use tokio::sync::broadcast;
 use tokio::task::AbortHandle;
 use tower_http::cors::CorsLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -39,6 +40,10 @@ pub struct AppState {
     pub heartbeat_tasks: Arc<DashMap<Uuid, HeartbeatTask>>,
     pub auth_sessions: Arc<DashMap<String, CachedAuthSession>>,
     pub spotify_tokens: Arc<DashMap<Uuid, CachedSpotifyToken>>,
+    pub party_events: Arc<DashMap<Uuid, broadcast::Sender<String>>>,
+    pub weave_events: Arc<DashMap<Uuid, broadcast::Sender<String>>>,
+    pub party_heartbeat_idle: Arc<DashSet<Uuid>>,
+    pub weave_heartbeat_idle: Arc<DashSet<Uuid>>,
 }
 
 #[tokio::main]
@@ -61,6 +66,10 @@ async fn main() -> anyhow::Result<()> {
         heartbeat_tasks: Arc::new(DashMap::new()),
         auth_sessions: Arc::new(DashMap::new()),
         spotify_tokens: Arc::new(DashMap::new()),
+        party_events: Arc::new(DashMap::new()),
+        weave_events: Arc::new(DashMap::new()),
+        party_heartbeat_idle: Arc::new(DashSet::new()),
+        weave_heartbeat_idle: Arc::new(DashSet::new()),
     };
 
     let allowed_origin: HeaderValue = std::env::var("ALLOWED_ORIGIN")

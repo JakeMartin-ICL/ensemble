@@ -2,26 +2,36 @@
 
 use db::PgPool;
 use playback::{BoxFuture, HeartbeatDriver};
+use tokio::sync::broadcast;
 use tracing::warn;
 use uuid::Uuid;
 
 pub struct HeartbeatParams {
     pub session_id: Uuid,
     pub pool: PgPool,
+    pub events: broadcast::Sender<String>,
 }
 
-pub async fn run(params: HeartbeatParams) {
+pub async fn run(params: HeartbeatParams) -> Option<playback::StopReason> {
     let driver = WeaveHeartbeat {
         session_id: params.session_id,
         pool: params.pool,
+        events: params.events,
     };
 
-    playback::run(playback::HeartbeatParams { driver }).await;
+    playback::run(playback::HeartbeatParams { driver }).await
 }
 
 struct WeaveHeartbeat {
     session_id: Uuid,
     pool: PgPool,
+    events: broadcast::Sender<String>,
+}
+
+impl WeaveHeartbeat {
+    fn emit(&self, event: &str) {
+        let _ = self.events.send(event.to_string());
+    }
 }
 
 impl HeartbeatDriver for WeaveHeartbeat {
@@ -72,7 +82,10 @@ impl HeartbeatDriver for WeaveHeartbeat {
                 track_uri,
                 &session.playlist_track_indexes,
             )
-            .await
+            .await?;
+            self.emit("session");
+            self.emit("queue");
+            Ok(())
         })
     }
 
@@ -90,7 +103,10 @@ impl HeartbeatDriver for WeaveHeartbeat {
                     track_uri,
                     &advance.track_indexes,
                 )
-                .await
+                .await?;
+                self.emit("session");
+                self.emit("queue");
+                Ok(())
             } else {
                 warn!(
                     "weave heartbeat: session {} has an empty playlist, cannot advance turn",
@@ -112,7 +128,9 @@ impl HeartbeatDriver for WeaveHeartbeat {
 
     fn set_queued_track<'a>(&'a self, track_uri: &'a str) -> BoxFuture<'a, anyhow::Result<()>> {
         Box::pin(async move {
-            db::weave::set_queued_track(&self.pool, self.session_id, track_uri).await
+            db::weave::set_queued_track(&self.pool, self.session_id, track_uri).await?;
+            self.emit("queue");
+            Ok(())
         })
     }
 
@@ -129,7 +147,16 @@ impl HeartbeatDriver for WeaveHeartbeat {
                 playback.duration_ms as i64,
                 playback.is_playing,
             )
-            .await
+            .await?;
+            self.emit("playback");
+            Ok(())
+        })
+    }
+
+    fn heartbeat_idle<'a>(&'a self) -> BoxFuture<'a, anyhow::Result<()>> {
+        Box::pin(async move {
+            self.emit("heartbeat_idle");
+            Ok(())
         })
     }
 }

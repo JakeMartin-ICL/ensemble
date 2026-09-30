@@ -43,11 +43,13 @@ dependencies = [
  "db",
  "dotenvy",
  "party",
+ "playback",
  "reqwest",
  "serde",
  "serde_json",
  "spotify",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "tower 0.4.13",
  "tower-http 0.5.2",
@@ -1283,6 +1285,7 @@ dependencies = [
  "serde_json",
  "spotify",
  "thiserror 1.0.69",
+ "tokio",
  "tracing",
  "uuid",
 ]
@@ -2251,6 +2254,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

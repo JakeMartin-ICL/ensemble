@@ -1,4 +1,4 @@
-import { del, get, getBlob, post } from './api'
+import { del, get, getBlob, post, subscribeSse } from './api'
 import type { PlaybackState, TrackDetails, TrackSearchResult } from './weave'
 
 const LIBRARY_CACHE_TTL_MS = 24 * 60 * 60 * 1000
@@ -132,8 +132,38 @@ export interface PartyPlaybackState extends PlaybackState {
   observed_at_ms: number
 }
 
+export type PartyEventType =
+  | 'session'
+  | 'playback'
+  | 'queue'
+  | 'source_queue'
+  | 'played'
+  | 'ended'
+  | 'heartbeat_idle'
+  | 'heartbeat_awake'
+
+export interface PartyEvent {
+  type: PartyEventType
+}
+
 export const getPartyPlayback = (id: string) =>
   get<PartyPlaybackState | null>(`/party/sessions/${id}/playback`)
+
+export const restartPartyHeartbeat = (id: string) =>
+  post<PartyPlaybackState | null>(`/party/sessions/${id}/heartbeat`, {})
+
+export const subscribePartyEvents = (
+  id: string,
+  onEvent: (event: PartyEvent) => void,
+  onError?: (error: unknown) => void,
+) =>
+  subscribeSse(
+    `/party/sessions/${id}/events`,
+    (event) => {
+      if (isPartyEvent(event)) onEvent(event)
+    },
+    onError,
+  )
 
 export const pausePartySession = (id: string) =>
   post<PartyPlaybackState | null>(`/party/sessions/${id}/pause`, {})
@@ -272,4 +302,17 @@ function isCachedPartySearchResponse(value: unknown): value is CachedPartySearch
   return typeof candidate.expires_at === 'number'
     && typeof candidate.value === 'object'
     && candidate.value !== null
+}
+
+function isPartyEvent(value: unknown): value is PartyEvent {
+  if (typeof value !== 'object' || value === null) return false
+  const candidate = value as { type?: unknown }
+  return candidate.type === 'session'
+    || candidate.type === 'playback'
+    || candidate.type === 'queue'
+    || candidate.type === 'source_queue'
+    || candidate.type === 'played'
+    || candidate.type === 'ended'
+    || candidate.type === 'heartbeat_idle'
+    || candidate.type === 'heartbeat_awake'
 }
